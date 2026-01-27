@@ -2,7 +2,11 @@
 Progress callback helper for synchronous nodes.
 """
 import asyncio
-from typing import Callable, Optional
+from typing import Callable, Optional, Dict, Any
+
+from app.core.logging import get_logger
+
+logger = get_logger("progress")
 
 
 def send_progress(callback: Optional[Callable], stage: str, message: str, progress: int):
@@ -25,3 +29,58 @@ def send_progress(callback: Optional[Callable], stage: str, message: str, progre
             asyncio.run(callback(stage, message, progress))
         except:
             pass  # Skip if unable to send progress
+
+
+def save_stage_output(video_id: str, stage_name: str, output: Dict[str, Any]):
+    """
+    Save stage output to database for real-time retrieval.
+    
+    This is called by each pipeline node after completing its work.
+    The output is stored in PostgreSQL and can be fetched via API.
+    
+    Args:
+        video_id: Video identifier
+        stage_name: Name of the completed stage
+        output: Dictionary with stage output data
+    """
+    if not video_id:
+        logger.warning(f"save_stage_output called without video_id for stage {stage_name}")
+        return
+    
+    logger.info(f"Saving stage output: {stage_name} for video {video_id}")
+    
+    try:
+        from app.db.connection import get_db
+        from app.db.repository import CheckpointRepository
+        
+        db = next(get_db())
+        checkpoint_repo = CheckpointRepository(db)
+        result = checkpoint_repo.save_stage_output(video_id, stage_name, output)
+        
+        if result:
+            logger.info(f"✓ Saved output for stage '{stage_name}' (video: {video_id})")
+        else:
+            logger.warning(f"save_stage_output returned None for {video_id}/{stage_name}")
+        
+    except Exception as e:
+        logger.error(f"Failed to save stage output for {video_id}/{stage_name}: {e}", exc_info=True)
+
+
+def format_stage_output(stage_name: str, **kwargs) -> Dict[str, Any]:
+    """
+    Format stage output in a consistent structure.
+    
+    Args:
+        stage_name: Name of the stage
+        **kwargs: Stage-specific output fields
+        
+    Returns:
+        Formatted output dictionary
+    """
+    from datetime import datetime
+    
+    return {
+        "stage": stage_name,
+        "timestamp": datetime.utcnow().isoformat(),
+        **kwargs
+    }

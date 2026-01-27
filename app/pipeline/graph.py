@@ -89,11 +89,12 @@ async def run_pipeline(video_path: str, policy_config: dict = None, video_id: st
                 return_exceptions=True  # Don't fail if one fails
             )
     
-    # Initialize state
+    # Initialize state (include video_id for stage output saving)
     initial_state = PipelineState(
         video_path=video_path,
         policy_config=policy_config,
-        progress_callback=progress_callback
+        progress_callback=progress_callback,
+        video_id=video_id  # Pass video_id for database operations
     )
     
     # Build graph

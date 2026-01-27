@@ -80,27 +80,29 @@ class SSEManager:
             if progress in milestone_progresses:
                 should_save = True
         
-        # Save checkpoint if needed
+        # Save checkpoint to PostgreSQL if needed
         if should_save:
             try:
-                from app.utils.checkpoints import get_checkpoint_manager
-                checkpoint_manager = get_checkpoint_manager()
+                from app.db.connection import get_db
+                from app.db.repository import CheckpointRepository
                 
                 # Get stored metadata for this video
                 metadata = self.video_metadata.get(video_id, {})
                 
-                checkpoint_data = {
-                    "video_id": video_id,
-                    "batch_video_id": metadata.get("batch_video_id"),
-                    "filename": metadata.get("filename"),
-                    "progress": progress,
-                    "stage": stage,
-                    "status": "processing",
-                    "duration": metadata.get("duration")
-                }
+                db = next(get_db())
+                checkpoint_repo = CheckpointRepository(db)
                 
-                checkpoint_manager.save_checkpoint(video_id, checkpoint_data)
-                logger.debug(f"Checkpoint saved for {video_id}: {stage} ({progress}%)")
+                checkpoint_repo.upsert(
+                    video_id=video_id,
+                    current_stage=stage,
+                    progress=progress,
+                    stage_states={
+                        "batch_video_id": metadata.get("batch_video_id"),
+                        "filename": metadata.get("filename"),
+                        "duration": metadata.get("duration")
+                    }
+                )
+                logger.debug(f"Checkpoint saved to DB for {video_id}: {stage} ({progress}%)")
                 
             except Exception as e:
                 logger.error(f"Failed to save checkpoint for {video_id}: {e}")
@@ -123,17 +125,12 @@ class SSEManager:
             self.disconnect(video_id, queue)
     
     async def send_complete(self, video_id: str):
-        """Send completion message and clear checkpoint."""
+        """Send completion message. Keep checkpoint for stage output viewing."""
         await self.send_progress(video_id, "complete", "Analysis complete", 100, save_checkpoint=False)
         
-        # Delete checkpoint on completion
-        try:
-            from app.utils.checkpoints import get_checkpoint_manager
-            checkpoint_manager = get_checkpoint_manager()
-            checkpoint_manager.delete_checkpoint(video_id)
-            logger.debug(f"Checkpoint cleared for completed video {video_id}")
-        except Exception as e:
-            logger.error(f"Failed to clear checkpoint for {video_id}: {e}")
+        # Don't delete checkpoint - keep stage outputs for later viewing
+        # The checkpoint can be manually deleted via API if needed
+        logger.debug(f"Video {video_id} completed - checkpoint preserved for stage output viewing")
         
         # Clean up metadata
         if video_id in self.video_metadata:

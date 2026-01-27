@@ -9,7 +9,7 @@ import asyncio
 import shutil
 from pathlib import Path
 from typing import Optional, List
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, WebSocket, WebSocketDisconnect, BackgroundTasks
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, WebSocket, WebSocketDisconnect, BackgroundTasks, Depends
 from fastapi.responses import FileResponse, StreamingResponse
 from app.api.schemas import (
     VideoEvaluationResponse,
@@ -26,7 +26,13 @@ from app.core.config import settings, get_policy_config, get_policy_presets, get
 from app.core.logging import get_logger
 from app.pipeline.graph import run_pipeline
 from app.utils.persistence import get_store
-from app.utils.checkpoints import get_checkpoint_manager
+from app.utils.storage import get_storage_service
+from app.db.connection import get_db
+from app.db.models import VideoStatus
+from app.db.repository import (
+    VideoRepository, ResultRepository, CheckpointRepository,
+    save_video_result, delete_video_complete, get_video_url
+)
 
 logger = get_logger("api.routes")
 
@@ -252,6 +258,12 @@ async def list_models():
             model_type="moderation",
             cached=True,
             status="ready"
+        ),
+        ModelInfo(
+            model_id=settings.qwen_model_id,
+            model_type="llm",
+            cached=True,
+            status="ready" if settings.llm_provider == "qwen" else "disabled"
         )
     ]
     
@@ -399,6 +411,25 @@ async def process_video_in_batch(video_path: Path, video_id: str, batch_id: str,
                 "duration": None  # Will be updated during processing
             })
             
+            # Create video record in database FIRST (required for checkpoints foreign key)
+            try:
+                db = next(get_db())
+                video_repo = VideoRepository(db)
+                existing = video_repo.get(video_id)
+                if not existing:
+                    video_repo.create(
+                        video_id=video_id,
+                        filename=video_data.get("filename", "unknown"),
+                        batch_id=batch_id,
+                        status=VideoStatus.PROCESSING,
+                        source="upload"
+                    )
+                    logger.info(f"Created video record in DB: {video_id}")
+                else:
+                    video_repo.update_status(video_id, VideoStatus.PROCESSING)
+            except Exception as db_err:
+                logger.warning(f"Failed to create video record: {db_err}")
+            
             # Run pipeline (models already loaded at startup)
             result = await run_pipeline(str(video_path), policy_config, video_id)
             
@@ -409,9 +440,24 @@ async def process_video_in_batch(video_path: Path, video_id: str, batch_id: str,
             batch_jobs[batch_id]["videos"][video_id]["result"] = result
             batch_jobs[batch_id]["completed"] += 1
             
-            # Clear checkpoint on successful completion
-            checkpoint_manager = get_checkpoint_manager()
-            checkpoint_manager.delete_checkpoint(video_id)
+            # Update video status in database and save result
+            try:
+                db = next(get_db())
+                video_repo = VideoRepository(db)
+                video_repo.update_status(video_id, VideoStatus.COMPLETED)
+                
+                # Save the video result to database for persistence
+                save_video_result(
+                    db=db,
+                    video_id=video_id,
+                    result=result,
+                    uploaded_video_path=str(video_path) if video_path.exists() else None,
+                    labeled_video_path=result.get("labeled_video_path")
+                )
+                logger.info(f"Saved result for video {video_id} to database")
+                
+            except Exception as db_err:
+                logger.warning(f"Failed to save video result for {video_id}: {db_err}", exc_info=True)
             
             logger.info(f"Video {video_id} completed: verdict={result['verdict']}")
             
@@ -585,32 +631,54 @@ async def get_batch_status(batch_id: str):
 
 @router.get("/video/labeled/{video_id}")
 async def get_labeled_video(video_id: str):
-    """Serve the labeled video with YOLO bounding boxes."""
-    # Search for the labeled video in the working directory
-    # This assumes the video_id is part of the work directory name
-    temp_base = Path(settings.temp_dir)
+    """Serve the labeled video with YOLO bounding boxes.
     
-    # Search for work directory containing this video_id
+    Tries MinIO first, falls back to local filesystem.
+    """
+    storage = get_storage_service()
+    
+    # Try MinIO first
+    try:
+        url = storage.get_labeled_video_url(video_id)
+        if url:
+            from fastapi.responses import RedirectResponse
+            return RedirectResponse(url=url)
+    except Exception as e:
+        logger.warning(f"MinIO lookup failed for labeled video {video_id}: {e}")
+    
+    # Fallback to local filesystem
+    temp_base = Path(settings.temp_dir)
     for work_dir in temp_base.glob("*"):
         if work_dir.is_dir():
             labeled_path = work_dir / "labeled.mp4"
-            if labeled_path.exists():
-                # Check if this is the right video by checking the video_id in the directory name
-                # The work directory is named with the video_id
-                if video_id in str(work_dir):
-                    return FileResponse(
-                        labeled_path,
-                        media_type="video/mp4",
-                        filename=f"{video_id}_labeled.mp4"
-                    )
+            if labeled_path.exists() and video_id in str(work_dir):
+                return FileResponse(
+                    labeled_path,
+                    media_type="video/mp4",
+                    filename=f"{video_id}_labeled.mp4"
+                )
     
     raise HTTPException(status_code=404, detail="Labeled video not found")
 
 
 @router.get("/video/uploaded/{video_id}")
 async def get_uploaded_video(video_id: str):
-    """Serve the original uploaded video for checkpoint recovery."""
-    # Search for uploaded video in persistent storage
+    """Serve the original uploaded video.
+    
+    Tries MinIO first, falls back to local filesystem.
+    """
+    storage = get_storage_service()
+    
+    # Try MinIO first
+    try:
+        url = storage.get_video_url(video_id)
+        if url:
+            from fastapi.responses import RedirectResponse
+            return RedirectResponse(url=url)
+    except Exception as e:
+        logger.warning(f"MinIO lookup failed for uploaded video {video_id}: {e}")
+    
+    # Fallback to local filesystem
     for video_file in UPLOADS_DIR.glob(f"{video_id}_*"):
         if video_file.is_file():
             return FileResponse(
@@ -643,28 +711,147 @@ async def save_results(results: List[dict]):
 
 @router.get("/results/load")
 async def load_results():
-    """Load saved results from persistent storage."""
+    """Load saved results from PostgreSQL database."""
     try:
-        store = get_store()
-        results = store.load_results()
+        db = next(get_db())
+        result_repo = ResultRepository(db)
+        video_repo = VideoRepository(db)
+        
+        # Get all results from database
+        db_results = result_repo.get_all()
+        
+        # Convert to list of dicts for API response (matching frontend expectations)
+        results = []
+        for r in db_results:
+            # Get video info
+            video = video_repo.get(r.video_id)
+            
+            # Load evidence from database
+            evidence_records = result_repo.get_evidence(r.id) if r.id else []
+            evidence = {
+                "vision": [],
+                "violence_segments": [],
+                "transcript": {"chunks": []},
+                "yoloworld": [],
+                "ocr": [],
+                "transcript_moderation": []
+            }
+            for ev in evidence_records:
+                if ev.evidence_type.value == "vision":
+                    evidence["vision"].append({
+                        "timestamp": ev.timestamp,
+                        "label": ev.label,
+                        "category": ev.category,
+                        "confidence": ev.confidence,
+                        "bbox": {"x1": ev.bbox_x1, "y1": ev.bbox_y1, "x2": ev.bbox_x2, "y2": ev.bbox_y2}
+                    })
+                elif ev.evidence_type.value == "violence":
+                    evidence["violence_segments"].append({
+                        "start_time": ev.start_time,
+                        "end_time": ev.end_time,
+                        "violence_score": ev.confidence
+                    })
+                elif ev.evidence_type.value == "transcript":
+                    evidence["transcript"]["chunks"].append({
+                        "start_time": ev.start_time,
+                        "end_time": ev.end_time,
+                        "text": ev.text_content
+                    })
+                elif ev.evidence_type.value == "yoloworld":
+                    evidence["yoloworld"].append({
+                        "timestamp": ev.timestamp,
+                        "label": ev.label,
+                        "prompt_match": ev.label,
+                        "category": ev.category,
+                        "confidence": ev.confidence,
+                        "bbox": {"x1": ev.bbox_x1, "y1": ev.bbox_y1, "x2": ev.bbox_x2, "y2": ev.bbox_y2}
+                    })
+                elif ev.evidence_type.value == "ocr":
+                    evidence["ocr"].append({
+                        "text": ev.text_content,
+                        "timestamp": ev.timestamp,
+                        "confidence": ev.confidence
+                    })
+                elif ev.evidence_type.value == "moderation":
+                    extra = ev.extra_data or {}
+                    evidence["transcript_moderation"].append({
+                        "start_time": ev.start_time,
+                        "end_time": ev.end_time,
+                        "text": ev.text_content,
+                        "profanity_score": extra.get("profanity_score", 0),
+                        "violence_score": extra.get("violence_score", 0),
+                        "sexual_score": extra.get("sexual_score", 0),
+                        "hate_score": extra.get("hate_score", 0),
+                        "drugs_score": extra.get("drugs_score", 0),
+                        "profanity_words": extra.get("profanity_words", [])
+                    })
+            
+            # Build the result object that frontend expects
+            result_data = {
+                "verdict": r.verdict.value if r.verdict else "UNKNOWN",
+                "confidence": max(r.violence_score or 0, r.profanity_score or 0, r.sexual_score or 0, r.drugs_score or 0, r.hate_score or 0),
+                "criteria": {
+                    "violence": {"score": r.violence_score or 0.0, "value": r.violence_score or 0.0},
+                    "profanity": {"score": r.profanity_score or 0.0, "value": r.profanity_score or 0.0},
+                    "sexual": {"score": r.sexual_score or 0.0, "value": r.sexual_score or 0.0},
+                    "drugs": {"score": r.drugs_score or 0.0, "value": r.drugs_score or 0.0},
+                    "hate": {"score": r.hate_score or 0.0, "value": r.hate_score or 0.0}
+                },
+                "report": r.report or "",
+                "processing_time_sec": r.processing_time or 0.0,
+                "violations": r.violations or [],
+                "transcript": r.transcript or evidence["transcript"],
+                "metadata": {
+                    "video_id": r.video_id,
+                    "duration": video.duration if video else None,
+                    "width": video.width if video else None,
+                    "height": video.height if video else None,
+                    "fps": video.fps if video else None
+                },
+                "evidence": evidence
+            }
+            
+            # Structure matching frontend's loadSavedResults expectations
+            results.append({
+                "id": r.video_id,  # Used as queue item id
+                "video_id": r.video_id,
+                "batchVideoId": r.video_id,  # For fetching stage outputs
+                "filename": video.filename if video else r.video_id,
+                "status": "completed",
+                "verdict": r.verdict.value if r.verdict else "UNKNOWN",
+                "duration": video.duration if video else None,
+                "result": result_data,  # The full result object
+                "timestamp": r.created_at.isoformat() if r.created_at else None
+            })
+        
         return {"status": "success", "results": results, "count": len(results)}
     
     except Exception as e:
-        logger.error(f"Load results failed: {e}")
+        logger.error(f"Load results failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.delete("/results/{video_id}")
 async def delete_result(video_id: str):
-    """Delete a specific result by video ID."""
+    """Delete a specific result by video ID from PostgreSQL."""
     try:
-        store = get_store()
-        success = store.delete_result(video_id)
+        db = next(get_db())
+        result_repo = ResultRepository(db)
+        video_repo = VideoRepository(db)
+        checkpoint_repo = CheckpointRepository(db)
+        
+        # Delete result and evidence
+        success = result_repo.delete(video_id)
+        
+        # Also delete associated video and checkpoint
+        video_repo.delete(video_id)
+        checkpoint_repo.delete(video_id)
         
         if success:
             return {"status": "success", "video_id": video_id}
         else:
-            raise HTTPException(status_code=404, detail="Video result not found")
+            # Still return success if checkpoint/video were deleted
+            return {"status": "success", "video_id": video_id, "note": "result not found, cleaned up related data"}
     
     except Exception as e:
         logger.error(f"Delete result failed: {e}")
@@ -673,15 +860,23 @@ async def delete_result(video_id: str):
 
 @router.delete("/results")
 async def clear_all_results():
-    """Delete all saved results."""
+    """Delete all saved results from PostgreSQL."""
     try:
-        store = get_store()
-        success = store.clear_all()
+        db = next(get_db())
+        result_repo = ResultRepository(db)
+        checkpoint_repo = CheckpointRepository(db)
+        video_repo = VideoRepository(db)
         
-        if success:
-            return {"status": "success", "message": "All results cleared"}
-        else:
-            raise HTTPException(status_code=500, detail="Failed to clear results")
+        # Delete all results and evidence
+        result_count = result_repo.delete_all()
+        
+        # Clear all checkpoints
+        checkpoint_repo.delete_all()
+        
+        # Clear all videos
+        video_repo.delete_all()
+        
+        return {"status": "success", "message": f"Cleared {result_count} results and all related data"}
     
     except Exception as e:
         logger.error(f"Clear results failed: {e}")
@@ -901,36 +1096,112 @@ async def import_from_urls(request: dict):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ===== Checkpoint Management Endpoints =====
+# ===== Stage Output Endpoints (Real-time stage results) =====
+
+@router.get("/video/{video_id}/stage/{stage_name}")
+async def get_stage_output(video_id: str, stage_name: str):
+    """
+    Get the output of a specific pipeline stage for a video.
+    
+    This allows the frontend to display stage results as they complete,
+    even while the pipeline is still running.
+    
+    Args:
+        video_id: Video identifier
+        stage_name: Stage name (e.g., "ingest", "yolo26", "violence", etc.)
+    
+    Returns:
+        Stage output data or 404 if not available yet
+    """
+    try:
+        db = next(get_db())
+        checkpoint_repo = CheckpointRepository(db)
+        
+        output = checkpoint_repo.get_stage_output(video_id, stage_name)
+        
+        if output is not None:
+            return {
+                "status": "success",
+                "video_id": video_id,
+                "stage": stage_name,
+                "output": output
+            }
+        else:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Stage '{stage_name}' output not available for video {video_id}"
+            )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Get stage output failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/video/{video_id}/stages")
+async def get_all_stage_outputs(video_id: str):
+    """
+    Get all available stage outputs for a video.
+    
+    Returns a map of stage_name -> output for all completed stages.
+    """
+    try:
+        db = next(get_db())
+        checkpoint_repo = CheckpointRepository(db)
+        
+        outputs = checkpoint_repo.get_all_stage_outputs(video_id)
+        checkpoint = checkpoint_repo.get(video_id)
+        
+        return {
+            "status": "success",
+            "video_id": video_id,
+            "current_stage": checkpoint.current_stage if checkpoint else None,
+            "progress": checkpoint.progress if checkpoint else 0,
+            "stages": outputs,
+            "completed_stages": list(outputs.keys())
+        }
+    
+    except Exception as e:
+        logger.error(f"Get all stage outputs failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ===== Checkpoint Management Endpoints (PostgreSQL-backed) =====
 
 @router.post("/checkpoints/save")
 async def save_checkpoint(checkpoint_data: dict):
     """
-    Save checkpoint for a video.
+    Save checkpoint for a video to PostgreSQL.
     
     Request body:
     {
         "video_id": "uuid",
-        "batch_video_id": "V_101_abc123",
-        "filename": "video.mp4",
+        "current_stage": "audio_transcription",
         "progress": 60,
-        "stage": "audio_transcription",
-        "status": "processing",
-        "duration": 120.5
+        "stage_states": {...},
+        "partial_results": {...}
     }
     """
     video_id = checkpoint_data.get('video_id')
     if not video_id:
         raise HTTPException(status_code=400, detail="video_id is required")
     
+    current_stage = checkpoint_data.get('current_stage') or checkpoint_data.get('stage', 'unknown')
+    
     try:
-        checkpoint_manager = get_checkpoint_manager()
-        success = checkpoint_manager.save_checkpoint(video_id, checkpoint_data)
+        db = next(get_db())
+        checkpoint_repo = CheckpointRepository(db)
         
-        if success:
-            return {"status": "success", "message": f"Checkpoint saved for {video_id}"}
-        else:
-            raise HTTPException(status_code=500, detail="Failed to save checkpoint")
+        checkpoint = checkpoint_repo.upsert(
+            video_id=video_id,
+            current_stage=current_stage,
+            progress=checkpoint_data.get('progress', 0),
+            stage_states=checkpoint_data.get('stage_states'),
+            partial_results=checkpoint_data.get('partial_results')
+        )
+        
+        return {"status": "success", "message": f"Checkpoint saved for {video_id}"}
     
     except Exception as e:
         logger.error(f"Save checkpoint failed: {e}")
@@ -939,15 +1210,15 @@ async def save_checkpoint(checkpoint_data: dict):
 
 @router.get("/checkpoints/load/{video_id}")
 async def load_checkpoint(video_id: str):
-    """
-    Load checkpoint for a specific video.
-    """
+    """Load checkpoint for a specific video from PostgreSQL."""
     try:
-        checkpoint_manager = get_checkpoint_manager()
-        checkpoint = checkpoint_manager.load_checkpoint(video_id)
+        db = next(get_db())
+        checkpoint_repo = CheckpointRepository(db)
+        
+        checkpoint = checkpoint_repo.get(video_id)
         
         if checkpoint:
-            return {"status": "success", "checkpoint": checkpoint}
+            return {"status": "success", "checkpoint": checkpoint.to_dict()}
         else:
             raise HTTPException(status_code=404, detail="Checkpoint not found")
     
@@ -960,17 +1231,17 @@ async def load_checkpoint(video_id: str):
 
 @router.get("/checkpoints/list")
 async def list_checkpoints():
-    """
-    List all checkpoints (interrupted videos).
-    """
+    """List all active checkpoints (interrupted videos) from PostgreSQL."""
     try:
-        checkpoint_manager = get_checkpoint_manager()
-        checkpoints = checkpoint_manager.get_interrupted_videos()
+        db = next(get_db())
+        checkpoint_repo = CheckpointRepository(db)
+        
+        checkpoints = checkpoint_repo.list()
         
         return {
             "status": "success",
             "count": len(checkpoints),
-            "checkpoints": checkpoints
+            "checkpoints": [cp.to_dict() for cp in checkpoints]
         }
     
     except Exception as e:
@@ -980,17 +1251,17 @@ async def list_checkpoints():
 
 @router.delete("/checkpoints/{video_id}")
 async def delete_checkpoint(video_id: str):
-    """
-    Delete checkpoint for a specific video.
-    """
+    """Delete checkpoint for a specific video from PostgreSQL."""
     try:
-        checkpoint_manager = get_checkpoint_manager()
-        success = checkpoint_manager.delete_checkpoint(video_id)
+        db = next(get_db())
+        checkpoint_repo = CheckpointRepository(db)
+        
+        success = checkpoint_repo.delete(video_id)
         
         if success:
             return {"status": "success", "message": f"Checkpoint deleted for {video_id}"}
         else:
-            raise HTTPException(status_code=500, detail="Failed to delete checkpoint")
+            raise HTTPException(status_code=404, detail="Checkpoint not found")
     
     except Exception as e:
         logger.error(f"Delete checkpoint failed: {e}")
@@ -999,12 +1270,14 @@ async def delete_checkpoint(video_id: str):
 
 @router.delete("/checkpoints")
 async def clear_all_checkpoints():
-    """
-    Clear all checkpoints.
-    """
+    """Clear all checkpoints from PostgreSQL."""
     try:
-        checkpoint_manager = get_checkpoint_manager()
-        count = checkpoint_manager.clear_all_checkpoints()
+        db = next(get_db())
+        
+        # Delete all checkpoints
+        from app.db.models import Checkpoint
+        count = db.query(Checkpoint).delete()
+        db.commit()
         
         return {"status": "success", "message": f"Cleared {count} checkpoint(s)"}
     
@@ -1016,14 +1289,20 @@ async def clear_all_checkpoints():
 @router.post("/checkpoints/cleanup")
 async def cleanup_old_checkpoints(max_age_hours: int = 24):
     """
-    Clean up old checkpoints.
+    Clean up old checkpoints from PostgreSQL.
     
     Query parameter:
         max_age_hours: Maximum age in hours (default: 24)
     """
     try:
-        checkpoint_manager = get_checkpoint_manager()
-        count = checkpoint_manager.cleanup_old_checkpoints(max_age_hours)
+        from datetime import datetime, timedelta
+        from app.db.models import Checkpoint
+        
+        db = next(get_db())
+        cutoff = datetime.utcnow() - timedelta(hours=max_age_hours)
+        
+        count = db.query(Checkpoint).filter(Checkpoint.updated_at < cutoff).delete()
+        db.commit()
         
         return {"status": "success", "message": f"Cleaned up {count} old checkpoint(s)"}
     

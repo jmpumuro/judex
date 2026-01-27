@@ -6,7 +6,7 @@ from pathlib import Path
 from app.pipeline.state import PipelineState
 from app.core.logging import get_logger
 from app.utils.ffmpeg import extract_frames, extract_segment_frames
-from app.utils.progress import send_progress
+from app.utils.progress import send_progress, save_stage_output, format_stage_output
 
 logger = get_logger("node.segment")
 
@@ -129,5 +129,15 @@ def segment_video(state: PipelineState) -> PipelineState:
     
     logger.info(f"Created {len(segments)} VideoMAE segments ({videomae_segment_duration}s window, {videomae_stride}s stride)")
     logger.info(f"Segment overlap: {((videomae_segment_duration - videomae_stride) / videomae_segment_duration * 100):.1f}%")
+    
+    # Save stage output for real-time retrieval
+    save_stage_output(state.get("video_id"), "segment", format_stage_output(
+        "segment",
+        frames_extracted=len(sampled_frames),
+        segments_created=len(segments),
+        sampling_fps=yolo_sampling_fps,
+        videomae_config=state.get("videomae_config"),
+        segment_overlap_percent=round((videomae_segment_duration - videomae_stride) / videomae_segment_duration * 100, 1)
+    ))
     
     return state

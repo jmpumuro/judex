@@ -5,7 +5,7 @@ from typing import Dict, Any, List, Tuple
 from app.pipeline.state import PipelineState
 from app.core.logging import get_logger
 from app.models.yolo26 import YOLO26Detector
-from app.utils.progress import send_progress
+from app.utils.progress import send_progress, save_stage_output, format_stage_output
 
 logger = get_logger("node.policy")
 
@@ -595,5 +595,28 @@ def fuse_evidence_policy(state: PipelineState) -> PipelineState:
     }
     
     state["evidence"] = evidence
+    
+    # Save stage output for real-time retrieval
+    save_stage_output(state.get("video_id"), "policy_fusion", format_stage_output(
+        "policy_fusion",
+        verdict=verdict,
+        scores={k: round(v, 3) for k, v in scores.items()},
+        violations_count=len(violations),
+        violations=[
+            {
+                "criterion": v.get("criterion"),
+                "score": round(v.get("score", 0), 3),
+                "threshold": v.get("threshold"),
+                "severity": v.get("severity")
+            }
+            for v in violations[:10]  # First 10 violations
+        ],
+        evidence_counts={
+            "vision": len(state.get("vision_detections", [])),
+            "violence_segments": len(state.get("violence_segments", [])),
+            "transcript_chunks": len(state.get("transcript", {}).get("chunks", [])),
+            "ocr_results": len(state.get("ocr_results", []))
+        }
+    ))
     
     return state

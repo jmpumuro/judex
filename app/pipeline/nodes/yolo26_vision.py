@@ -6,7 +6,7 @@ from app.pipeline.state import PipelineState
 from app.core.logging import get_logger
 from app.models import get_yolo26_detector
 from app.utils.hashing import generate_vision_id
-from app.utils.progress import send_progress
+from app.utils.progress import send_progress, save_stage_output, format_stage_output
 from app.utils.ffmpeg import create_labeled_video
 
 logger = get_logger("node.yolo26")
@@ -72,5 +72,25 @@ def run_yolo26_vision(state: PipelineState) -> PipelineState:
         except Exception as e:
             logger.error(f"Failed to create labeled video: {e}")
             # Don't fail the pipeline if labeled video creation fails
+    
+    # Save stage output for real-time retrieval
+    signals = detector.get_safety_signals(all_detections) if all_detections else {}
+    
+    # Summarize detections by label
+    detection_summary = {}
+    for det in all_detections:
+        label = det.get("label", "unknown")
+        detection_summary[label] = detection_summary.get(label, 0) + 1
+    
+    save_stage_output(state.get("video_id"), "yolo26", format_stage_output(
+        "yolo26",
+        total_detections=len(all_detections),
+        frames_analyzed=len(sampled_frames),
+        detection_summary=detection_summary,
+        safety_signals=signals,
+        labeled_video_created=state.get("labeled_video_path") is not None,
+        # Include top 20 detections for preview
+        detections=all_detections[:20] if all_detections else []
+    ))
     
     return state

@@ -36,9 +36,24 @@ class Settings(BaseSettings):
     profanity_model_id: str = os.getenv("PROFANITY_MODEL_ID", "tarekziade/pardonmyai")
     nli_model_id: str = os.getenv("NLI_MODEL_ID", "facebook/bart-large-mnli")
     
-    # OpenAI Settings
+    # LLM Settings (Qwen for local, OpenAI as fallback)
+    llm_provider: str = os.getenv("LLM_PROVIDER", "qwen")  # "qwen" or "openai"
+    qwen_model_id: str = os.getenv("QWEN_MODEL_ID", "Qwen/Qwen2.5-0.5B-Instruct")  # Use 0.5B for memory efficiency
+    
+    # OpenAI Settings (fallback)
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    
+    # Database Settings
+    database_url: str = os.getenv("DATABASE_URL", "postgresql://docker:docker@localhost:5432/safevid")
+    
+    # MinIO Object Storage Settings
+    minio_endpoint: str = os.getenv("MINIO_ENDPOINT", "localhost:9000")
+    minio_external_endpoint: str = os.getenv("MINIO_EXTERNAL_ENDPOINT", "localhost:9000")  # For browser access
+    minio_access_key: str = os.getenv("MINIO_ACCESS_KEY", "safevid")
+    minio_secret_key: str = os.getenv("MINIO_SECRET_KEY", "safevid123")
+    minio_bucket: str = os.getenv("MINIO_BUCKET", "safevid")
+    minio_secure: bool = os.getenv("MINIO_SECURE", "false").lower() == "true"
     
     # Video Processing Settings
     default_sampling_fps: float = float(os.getenv("DEFAULT_SAMPLING_FPS", "1.0"))

@@ -100,6 +100,11 @@ export const resultsApi = {
   delete: async (videoId: string) => {
     await api.delete(`/results/${videoId}`)
   },
+
+  // Clear all results
+  clearAll: async () => {
+    await api.delete('/results')
+  },
 }
 
 // ===== CHECKPOINTS API =====
@@ -124,6 +129,35 @@ export const checkpointsApi = {
   // Delete a checkpoint
   delete: async (videoId: string) => {
     await api.delete(`/checkpoints/${videoId}`)
+  },
+
+  // Clear all checkpoints
+  clearAll: async () => {
+    await api.delete('/checkpoints')
+  },
+}
+
+// ===== STAGE OUTPUT API =====
+
+export const stageApi = {
+  // Get all completed stage outputs for a video
+  getAllStages: async (videoId: string) => {
+    try {
+      const { data } = await api.get(`/video/${videoId}/stages`)
+      return data
+    } catch {
+      return { stages: {}, completed_stages: [] }
+    }
+  },
+
+  // Get specific stage output
+  getStageOutput: async (videoId: string, stageName: string) => {
+    try {
+      const { data } = await api.get(`/video/${videoId}/stage/${stageName}`)
+      return data.output || null
+    } catch {
+      return null
+    }
   },
 }
 

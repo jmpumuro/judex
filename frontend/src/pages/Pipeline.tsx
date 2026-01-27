@@ -6,22 +6,23 @@ import {
 } from 'lucide-react'
 import { useVideoStore, QueueVideo, VideoStatus } from '@/store/videoStore'
 import { useSettingsStore } from '@/store/settingsStore'
-import { evaluationApi, resultsApi, checkpointsApi, videoApi, createSSEConnection } from '@/api/endpoints'
+import { evaluationApi, resultsApi, checkpointsApi, videoApi, stageApi, createSSEConnection } from '@/api/endpoints'
 import toast from 'react-hot-toast'
 
 // Pipeline stage definitions
+// 'id' is used for UI tracking, 'backendId' is used for API calls
 const PIPELINE_STAGES = [
-  { id: 'ingest_video', name: 'Ingest', number: '01' },
-  { id: 'segment_video', name: 'Segment', number: '02' },
-  { id: 'yolo26_vision', name: 'Vision', number: '03' },
-  { id: 'yoloworld_vision', name: 'YOLO-W', number: '04' },
-  { id: 'violence_detection', name: 'Violence', number: '05' },
-  { id: 'audio_transcription', name: 'Audio', number: '06' },
-  { id: 'ocr_extraction', name: 'OCR', number: '07' },
-  { id: 'text_moderation', name: 'Moderate', number: '08' },
-  { id: 'policy_fusion', name: 'Scoring', number: '09' },
-  { id: 'report_generation', name: 'Report', number: '10' },
-  { id: 'finalize', name: 'Finalize', number: '11' },
+  { id: 'ingest_video', backendId: 'ingest', name: 'Ingest', number: '01' },
+  { id: 'segment_video', backendId: 'segment', name: 'Segment', number: '02' },
+  { id: 'yolo26_vision', backendId: 'yolo26', name: 'Vision', number: '03' },
+  { id: 'yoloworld_vision', backendId: 'yoloworld', name: 'YOLO-W', number: '04' },
+  { id: 'violence_detection', backendId: 'violence', name: 'Violence', number: '05' },
+  { id: 'audio_transcription', backendId: 'audio_asr', name: 'Audio', number: '06' },
+  { id: 'ocr_extraction', backendId: 'ocr', name: 'OCR', number: '07' },
+  { id: 'text_moderation', backendId: 'text_moderation', name: 'Moderate', number: '08' },
+  { id: 'policy_fusion', backendId: 'policy_fusion', name: 'Scoring', number: '09' },
+  { id: 'report_generation', backendId: 'report', name: 'Report', number: '10' },
+  { id: 'finalize', backendId: 'finalize', name: 'Finalize', number: '11' },
 ]
 
 const STAGE_PROGRESS_MAP: Record<string, number> = {
@@ -84,10 +85,12 @@ const generateStageContent = (stageName: string, data: any) => {
     }
     
     case 'segment_video': {
-      const sampledFrames = data.sampled_frames || metadata.sampled_frames || evidence.frames?.length
-      const segments = data.segments || metadata.segments || evidence.violence_segments?.length
-      const samplingFps = data.yolo_sampling_fps || metadata.sampling_fps || 1.0
+      // Stage output uses frames_extracted and segments_created
+      const sampledFrames = data.frames_extracted || data.sampled_frames || metadata.sampled_frames || evidence.frames?.length
+      const segments = data.segments_created || data.segments || metadata.segments || evidence.violence_segments?.length
+      const samplingFps = data.sampling_fps || data.yolo_sampling_fps || metadata.sampling_fps || 1.0
       const videomaeConfig = data.videomae_config || {}
+      const overlapPct = data.segment_overlap_percent
       
       return (
         <div className="space-y-3">
@@ -105,30 +108,39 @@ const generateStageContent = (stageName: string, data: any) => {
               <div className="text-lg font-medium">{Array.isArray(segments) ? segments.length : (segments || 'N/A')}</div>
             </div>
           </div>
-          {videomaeConfig.segment_duration && (
+          {(videomaeConfig.segment_duration || overlapPct !== undefined) && (
             <div className="bg-gray-900 p-2 border-l-2 border-blue-500 text-xs text-gray-400">
-              VideoMAE: {videomaeConfig.segment_duration}s window, {videomaeConfig.stride}s stride
-              <div className="text-blue-400 mt-1">✓ 16 frames @ 8fps per segment</div>
+              {videomaeConfig.segment_duration && (
+                <>VideoMAE: {videomaeConfig.segment_duration}s window, {videomaeConfig.stride}s stride</>
+              )}
+              {overlapPct !== undefined && (
+                <div className="text-blue-400 mt-1">✓ Segment overlap: {overlapPct}%</div>
+              )}
             </div>
           )}
         </div>
       )
     }
     
-    // YOLO26 Vision - uses evidence.vision
+    // YOLO26 Vision - uses detections from stage output or evidence.vision
     case 'yolo26_vision': {
-      const visionData = evidence.vision || []
-      const objectCounts: Record<string, number> = {}
-      visionData.forEach((d: any) => {
-        const label = d.label || d.class || 'unknown'
-        objectCounts[label] = (objectCounts[label] || 0) + 1
-      })
+      // Stage output has detections at top level, final result has evidence.vision
+      const visionData = data.detections || evidence.vision || []
+      const summary = data.detection_summary || {}
+      const objectCounts: Record<string, number> = Object.keys(summary).length > 0 
+        ? summary 
+        : visionData.reduce((acc: Record<string, number>, d: any) => {
+            const label = d.label || d.class || 'unknown'
+            acc[label] = (acc[label] || 0) + 1
+            return acc
+          }, {})
       const topObjects = Object.entries(objectCounts).sort((a, b) => b[1] - a[1]).slice(0, 8)
+      const totalDetections = data.total_detections || visionData.length
       
       return (
         <div className="space-y-3">
           <div className="text-sm">
-            <strong>{visionData.length}</strong> objects detected across <strong>{Object.keys(objectCounts).length}</strong> categories
+            <strong>{totalDetections}</strong> objects detected across <strong>{Object.keys(objectCounts).length}</strong> categories
           </div>
           {topObjects.length > 0 ? (
             <div className="grid grid-cols-2 gap-2">
@@ -142,24 +154,35 @@ const generateStageContent = (stageName: string, data: any) => {
           ) : (
             <div className="text-gray-500 text-sm">No objects detected</div>
           )}
+          {data.safety_signals && (
+            <div className="mt-2 pt-2 border-t border-gray-800 text-xs text-gray-400">
+              <span className={data.safety_signals.has_weapons ? 'text-red-400' : 'text-green-400'}>
+                {data.safety_signals.has_weapons ? `⚠️ ${data.safety_signals.weapon_count} weapons` : '✓ No weapons'}
+              </span>
+              {' • '}
+              <span>{data.safety_signals.person_count} persons detected</span>
+            </div>
+          )}
         </div>
       )
     }
     
     // YOLO-World Vision - uses evidence.yoloworld with prompt matching
     case 'yoloworld_vision': {
-      const yoloworldData = evidence.yoloworld || []
-      const matchedPrompts = [...new Set(yoloworldData.map((d: any) => d.prompt_match || d.label))]
+      // Stage output has detections at top level, final result has evidence.yoloworld
+      const yoloworldData = data.detections || evidence.yoloworld || []
+      const matchedPrompts = [...new Set(yoloworldData.map((d: any) => d.prompt_match || d.label).filter(Boolean))]
       const yoloworldCounts: Record<string, number> = {}
       yoloworldData.forEach((d: any) => {
         const label = d.prompt_match || d.label
-        yoloworldCounts[label] = (yoloworldCounts[label] || 0) + 1
+        if (label) yoloworldCounts[label] = (yoloworldCounts[label] || 0) + 1
       })
+      const totalDetections = data.total_detections || yoloworldData.length
       
       return (
         <div className="space-y-3">
           <div className="text-sm">
-            <strong>{yoloworldData.length}</strong> detections from <strong>{matchedPrompts.length}</strong> prompts
+            <strong>{totalDetections}</strong> detections from <strong>{matchedPrompts.length}</strong> prompts
           </div>
           {matchedPrompts.length > 0 ? (
             <div className="grid grid-cols-2 gap-2">
@@ -173,12 +196,24 @@ const generateStageContent = (stageName: string, data: any) => {
           ) : (
             <div className="text-gray-500 text-sm">No custom prompts matched</div>
           )}
+          {data.safety_signals && (
+            <div className="mt-2 pt-2 border-t border-gray-800 text-xs text-gray-400">
+              <span className={data.safety_signals.has_weapons ? 'text-red-400' : 'text-green-400'}>
+                {data.safety_signals.has_weapons ? `⚠️ ${data.safety_signals.weapon_count} weapons` : '✓ No weapons'}
+              </span>
+              {' • '}
+              <span className={data.safety_signals.has_substances ? 'text-yellow-400' : 'text-green-400'}>
+                {data.safety_signals.has_substances ? `⚠️ ${data.safety_signals.substance_count} substances` : '✓ No substances'}
+              </span>
+            </div>
+          )}
         </div>
       )
     }
     
     case 'violence_detection': {
-      const violenceSegments = evidence.violence_segments || evidence.violence || []
+      // Stage output has violence_segments at top level
+      const violenceSegments = data.violence_segments || evidence.violence_segments || evidence.violence || []
       const highViolence = violenceSegments.filter((s: any) => (s.violence_score || s.score || 0) > 0.5)
       const maxScore = Math.max(...violenceSegments.map((s: any) => s.violence_score || s.score || 0), 0)
       
@@ -216,10 +251,10 @@ const generateStageContent = (stageName: string, data: any) => {
     }
     
     case 'audio_transcription': {
-      // Try both data.transcript and evidence.transcript (like index.html)
+      // Stage output has full_text and chunks at top level
       const transcript = data.transcript || evidence.transcript || {}
-      const chunks = transcript.chunks || evidence.asr || []
-      const fullText = transcript.text || ''
+      const chunks = data.chunks || transcript.chunks || evidence.asr || []
+      const fullText = data.full_text || transcript.text || ''
       
       return (
         <div className="space-y-3">
@@ -260,14 +295,25 @@ const generateStageContent = (stageName: string, data: any) => {
     }
     
     case 'ocr_extraction': {
+      // Stage output has texts array directly, final result has evidence.ocr
       const ocrResults = evidence.ocr || data.ocr || []
-      const texts = ocrResults.map((o: any) => o.text).filter(Boolean)
+      const textsFromStage = data.texts || []
+      const texts = textsFromStage.length > 0 ? textsFromStage : ocrResults.map((o: any) => o.text).filter(Boolean)
+      const totalDetections = data.total_detections || ocrResults.length
       
       return (
         <div className="space-y-3">
-          <div className="bg-black p-3 border border-gray-800">
-            <div className="text-[10px] text-gray-500 mb-1">TEXT REGIONS</div>
-            <div className="text-lg font-medium">{ocrResults.length}</div>
+          <div className="grid grid-cols-2 gap-2">
+            <div className="bg-black p-3 border border-gray-800">
+              <div className="text-[10px] text-gray-500 mb-1">TEXT REGIONS</div>
+              <div className="text-lg font-medium">{totalDetections}</div>
+            </div>
+            {data.frames_analyzed && (
+              <div className="bg-black p-3 border border-gray-800">
+                <div className="text-[10px] text-gray-500 mb-1">FRAMES WITH TEXT</div>
+                <div className="text-lg font-medium">{data.frames_with_text || 0}/{data.frames_analyzed}</div>
+              </div>
+            )}
           </div>
           {texts.length > 0 ? (
             <div className="space-y-1">
@@ -276,6 +322,9 @@ const generateStageContent = (stageName: string, data: any) => {
                   {text}
                 </div>
               ))}
+              {texts.length > 5 && (
+                <div className="text-[10px] text-gray-500 text-center">... and {texts.length - 5} more</div>
+              )}
             </div>
           ) : (
             <div className="text-gray-500 text-sm">No text detected in video</div>
@@ -286,30 +335,36 @@ const generateStageContent = (stageName: string, data: any) => {
     
     // Text Moderation - uses transcript_moderation and ocr_moderation
     case 'text_moderation': {
+      // Stage output has flagged_* at top level
       const transcriptMod = data.transcript_moderation || evidence.transcript_moderation || []
       const ocrMod = data.ocr_moderation || evidence.ocr_moderation || []
-      const flaggedTranscript = transcriptMod.filter((m: any) => 
+      const flaggedTranscript = data.flagged_transcript || transcriptMod.filter((m: any) => 
         m.profanity_score > 0.3 || m.sexual_score > 0.3 || m.hate_score > 0.3 || m.violence_score > 0.3 || m.drugs_score > 0.3
       )
-      const flaggedOcr = ocrMod.filter((m: any) => 
+      const flaggedOcr = data.flagged_ocr || ocrMod.filter((m: any) => 
         m.profanity_score > 0.3 || m.sexual_score > 0.3 || m.hate_score > 0.3 || m.violence_score > 0.3 || m.drugs_score > 0.3
       )
+      const transcriptCount = data.transcript_chunks_analyzed || transcriptMod.length
+      const ocrCount = data.ocr_items_analyzed || ocrMod.length
+      
+      const flaggedTranscriptCount = data.flagged_transcript_count ?? flaggedTranscript.length
+      const flaggedOcrCount = data.flagged_ocr_count ?? flaggedOcr.length
       
       return (
         <div className="space-y-3">
           <div className="grid grid-cols-2 gap-2">
             <div className="bg-black p-3 border border-gray-800">
               <div className="text-[10px] text-gray-500 mb-1">TRANSCRIPT CHUNKS</div>
-              <div className="text-lg font-medium">{transcriptMod.length}</div>
-              <div className={`text-[10px] mt-1 ${flaggedTranscript.length > 0 ? 'text-red-400' : 'text-green-400'}`}>
-                {flaggedTranscript.length} flagged
+              <div className="text-lg font-medium">{transcriptCount}</div>
+              <div className={`text-[10px] mt-1 ${flaggedTranscriptCount > 0 ? 'text-red-400' : 'text-green-400'}`}>
+                {flaggedTranscriptCount} flagged
               </div>
             </div>
             <div className="bg-black p-3 border border-gray-800">
               <div className="text-[10px] text-gray-500 mb-1">OCR TEXTS</div>
-              <div className="text-lg font-medium">{ocrMod.length}</div>
-              <div className={`text-[10px] mt-1 ${flaggedOcr.length > 0 ? 'text-red-400' : 'text-green-400'}`}>
-                {flaggedOcr.length} flagged
+              <div className="text-lg font-medium">{ocrCount}</div>
+              <div className={`text-[10px] mt-1 ${flaggedOcrCount > 0 ? 'text-red-400' : 'text-green-400'}`}>
+                {flaggedOcrCount} flagged
               </div>
             </div>
           </div>
@@ -321,10 +376,10 @@ const generateStageContent = (stageName: string, data: any) => {
                 <div key={i} className="bg-black p-2 border-l-2 border-red-500 text-xs">
                   <div className="text-gray-300 mb-1">"{mod.text || mod.original_text || 'N/A'}"</div>
                   <div className="flex flex-wrap gap-2 text-[10px]">
-                    {mod.profanity_score > 0.3 && <span className="text-red-400">Profanity: {(mod.profanity_score * 100).toFixed(0)}%</span>}
-                    {mod.sexual_score > 0.3 && <span className="text-red-400">Sexual: {(mod.sexual_score * 100).toFixed(0)}%</span>}
-                    {mod.hate_score > 0.3 && <span className="text-red-400">Hate: {(mod.hate_score * 100).toFixed(0)}%</span>}
-                    {mod.violence_score > 0.3 && <span className="text-red-400">Violence: {(mod.violence_score * 100).toFixed(0)}%</span>}
+                    {(mod.profanity_score || mod.profanity || 0) > 0.3 && <span className="text-red-400">Profanity: {((mod.profanity_score || mod.profanity) * 100).toFixed(0)}%</span>}
+                    {(mod.sexual_score || mod.sexual || 0) > 0.3 && <span className="text-red-400">Sexual: {((mod.sexual_score || mod.sexual) * 100).toFixed(0)}%</span>}
+                    {(mod.hate_score || mod.hate || 0) > 0.3 && <span className="text-red-400">Hate: {((mod.hate_score || mod.hate) * 100).toFixed(0)}%</span>}
+                    {(mod.violence_score || mod.violence || 0) > 0.3 && <span className="text-red-400">Violence: {((mod.violence_score || mod.violence) * 100).toFixed(0)}%</span>}
                     {mod.profanity_words?.length > 0 && <span className="text-red-400">[{mod.profanity_words.join(', ')}]</span>}
                   </div>
                   <div className="text-gray-600 text-[10px] mt-1">
@@ -335,7 +390,7 @@ const generateStageContent = (stageName: string, data: any) => {
             </div>
           )}
           
-          {transcriptMod.length > 0 && flaggedTranscript.length === 0 && (
+          {transcriptCount > 0 && flaggedTranscript.length === 0 && (
             <div className="space-y-1">
               <div className="text-xs font-medium text-green-400">📝 Sample Clean Transcript:</div>
               {transcriptMod.slice(0, 2).map((mod: any, i: number) => (
@@ -364,17 +419,31 @@ const generateStageContent = (stageName: string, data: any) => {
     }
     
     case 'policy_fusion': {
-      const criteria = data.criteria || {}
+      // Stage output has scores, verdict, violations at top level
+      const scores = data.scores || data.criteria || {}
+      const verdict = data.verdict || 'unknown'
+      const violations = data.violations || []
+      const violationsCount = data.violations_count ?? violations.length
       
       return (
         <div className="space-y-3">
+          <div className={`bg-black p-3 border-2 ${verdict === 'fail' ? 'border-red-500' : verdict === 'pass' ? 'border-green-500' : 'border-yellow-500'}`}>
+            <div className="text-[10px] text-gray-500 mb-1">VERDICT</div>
+            <div className={`text-xl font-bold uppercase ${verdict === 'fail' ? 'text-red-400' : verdict === 'pass' ? 'text-green-400' : 'text-yellow-400'}`}>
+              {verdict}
+            </div>
+            {violationsCount > 0 && (
+              <div className="text-xs text-red-400 mt-1">{violationsCount} violations</div>
+            )}
+          </div>
+          
           <div className="grid grid-cols-2 gap-2">
-            {Object.entries(criteria).slice(0, 6).map(([key, val]: [string, any]) => {
-              const score = typeof val === 'object' ? (val.score || val.value || 0) : (parseFloat(val) || 0)
+            {Object.entries(scores).slice(0, 6).map(([key, val]: [string, any]) => {
+              const score = typeof val === 'object' ? (val.score || val.value || 0) : (parseFloat(String(val)) || 0)
               const pct = (score * 100).toFixed(0)
               return (
                 <div key={key} className="bg-black p-3 border border-gray-800">
-                  <div className="text-[10px] text-gray-500 mb-1 uppercase">{key}</div>
+                  <div className="text-[10px] text-gray-500 mb-1 uppercase">{key.replace(/_/g, ' ')}</div>
                   <div className={`text-lg font-medium ${score > 0.6 ? 'text-red-400' : score > 0.3 ? 'text-yellow-400' : 'text-green-400'}`}>
                     {pct}%
                   </div>
@@ -382,14 +451,34 @@ const generateStageContent = (stageName: string, data: any) => {
               )
             })}
           </div>
+          
+          {violations.length > 0 && (
+            <div className="space-y-1">
+              <div className="text-xs font-medium text-red-400">⚠️ Violations:</div>
+              {violations.slice(0, 3).map((v: any, i: number) => (
+                <div key={i} className="bg-black p-2 border-l-2 border-red-500 text-xs">
+                  <span className="text-gray-300">{v.criterion}</span>
+                  <span className="text-red-400 ml-2">{((v.score || 0) * 100).toFixed(0)}%</span>
+                  <span className="text-gray-500 ml-2">({v.severity})</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )
     }
     
     case 'report_generation': {
-      const summary = data.report || data.summary
+      // Stage output has report_preview at top level
+      const summary = data.report_preview || data.report || data.summary
+      const reportType = data.report_type || 'generated'
+      
       return (
         <div className="space-y-3">
+          <div className="bg-black p-2 border border-gray-800 text-xs">
+            <span className="text-gray-500">Type:</span>{' '}
+            <span className={reportType === 'qwen' ? 'text-blue-400' : 'text-gray-300'}>{reportType}</span>
+          </div>
           {summary ? (
             <div className="bg-gray-900 p-3 text-xs text-gray-300 max-h-48 overflow-y-auto whitespace-pre-wrap">
               {summary}
@@ -438,9 +527,49 @@ const Pipeline: FC = () => {
   const [urlInput, setUrlInput] = useState('')
   const [videoType, setVideoType] = useState<'labeled' | 'original'>('labeled')
   const [selectedStage, setSelectedStage] = useState<string | null>(null)
+  const [stageOutput, setStageOutput] = useState<any>(null)
+  const [stageLoading, setStageLoading] = useState(false)
+  const [completedStages, setCompletedStages] = useState<string[]>([])
   const [videoError, setVideoError] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const sseConnectionsRef = useRef<Map<string, EventSource>>(new Map())
+
+  // LocalStorage cache helpers for stage outputs
+  const STAGE_CACHE_KEY = 'safevid_stage_outputs'
+  const STAGE_CACHE_EXPIRY = 24 * 60 * 60 * 1000 // 24 hours
+
+  const getCachedStageOutput = (videoId: string, stageName: string): any | null => {
+    try {
+      const cache = JSON.parse(localStorage.getItem(STAGE_CACHE_KEY) || '{}')
+      const key = `${videoId}:${stageName}`
+      const entry = cache[key]
+      if (entry && Date.now() - entry.timestamp < STAGE_CACHE_EXPIRY) {
+        return entry.data
+      }
+      return null
+    } catch {
+      return null
+    }
+  }
+
+  const setCachedStageOutput = (videoId: string, stageName: string, data: any) => {
+    try {
+      const cache = JSON.parse(localStorage.getItem(STAGE_CACHE_KEY) || '{}')
+      const key = `${videoId}:${stageName}`
+      cache[key] = { data, timestamp: Date.now() }
+      // Clean old entries (keep last 100)
+      const entries = Object.entries(cache)
+      if (entries.length > 100) {
+        const sorted = entries.sort((a: any, b: any) => b[1].timestamp - a[1].timestamp)
+        const cleaned = Object.fromEntries(sorted.slice(0, 100))
+        localStorage.setItem(STAGE_CACHE_KEY, JSON.stringify(cleaned))
+      } else {
+        localStorage.setItem(STAGE_CACHE_KEY, JSON.stringify(cache))
+      }
+    } catch {
+      // Ignore localStorage errors
+    }
+  }
 
   // Load saved results and checkpoints on mount
   useEffect(() => {
@@ -638,6 +767,49 @@ const Pipeline: FC = () => {
     await processSingleVideo(videoId)
   }
 
+  // Delete video from queue and backend
+  const handleDeleteVideo = async (videoId: string, video: QueueVideo) => {
+    // Remove from local store first
+    removeVideo(videoId)
+    
+    // Delete from backend if it was saved
+    const backendId = video.batchVideoId || videoId
+    try {
+      // Delete result (also deletes from database)
+      await resultsApi.delete(backendId)
+    } catch (e) {
+      // Ignore if not found
+    }
+    try {
+      // Delete checkpoint
+      await checkpointsApi.delete(backendId)
+    } catch (e) {
+      // Ignore if not found
+    }
+    toast.success('Video deleted')
+  }
+
+  // Clear all videos from queue and backend
+  const handleClearAll = async () => {
+    if (!confirm('Delete all videos from queue and saved results?')) return
+    
+    // Get all video IDs before clearing
+    const videoIds = queue.map(v => v.id)
+    
+    // Clear local store
+    videoIds.forEach(id => removeVideo(id))
+    
+    // Delete all from backend
+    try {
+      await resultsApi.clearAll().catch(() => {})
+      await checkpointsApi.clearAll().catch(() => {})
+    } catch (e) {
+      // Continue even if backend fails
+    }
+    
+    toast.success('All videos cleared')
+  }
+
   const selectedVideo = selectedVideoId ? getVideoById(selectedVideoId) : null
   
   const getStageStatus = (stageId: string, video: QueueVideo | null) => {
@@ -651,6 +823,157 @@ const Pipeline: FC = () => {
     return 'pending'
   }
 
+  // Fetch stage output from backend with localStorage caching
+  const fetchStageOutput = async (videoId: string, stageName: string) => {
+    setStageLoading(true)
+    
+    // Check localStorage cache first
+    const cached = getCachedStageOutput(videoId, stageName)
+    if (cached) {
+      console.log('Using cached stage output for:', stageName)
+      setStageOutput(cached)
+      setStageLoading(false)
+      return
+    }
+    
+    try {
+      const output = await stageApi.getStageOutput(videoId, stageName)
+      if (output && Object.keys(output).length > 0) {
+        // Cache the result
+        setCachedStageOutput(videoId, stageName, output)
+        setStageOutput(output)
+        setStageLoading(false)
+        return
+      }
+    } catch (error) {
+      console.log('Stage output not in checkpoint, using fallback:', stageName)
+    }
+    
+    // Fallback: derive stage data from video result
+    if (selectedVideo?.result) {
+      console.log('Deriving stage output from result for:', stageName)
+      const derivedOutput = deriveStageOutputFromResult(stageName, selectedVideo.result)
+      // Cache the derived output too
+      setCachedStageOutput(videoId, stageName, derivedOutput)
+      setStageOutput(derivedOutput)
+    } else {
+      console.log('No result data available for fallback')
+      setStageOutput(null)
+    }
+    setStageLoading(false)
+  }
+  
+  // Derive stage-specific output from overall result (for older videos without checkpoint data)
+  const deriveStageOutputFromResult = (stageName: string, result: any) => {
+    const evidence = result.evidence || {}
+    const metadata = result.metadata || {}
+    
+    switch (stageName) {
+      case 'ingest':
+        return {
+          stage: 'ingest',
+          duration: metadata.duration,
+          fps: metadata.fps,
+          width: metadata.width,
+          height: metadata.height,
+          has_audio: metadata.has_audio
+        }
+      case 'segment':
+        return {
+          stage: 'segment',
+          frames_extracted: metadata.frames_analyzed || 0,
+          segments_created: metadata.segments_analyzed || 0
+        }
+      case 'yolo26':
+        return {
+          stage: 'yolo26',
+          detections: evidence.vision || [],
+          total_detections: (evidence.vision || []).length
+        }
+      case 'yoloworld':
+        return {
+          stage: 'yoloworld',
+          detections: evidence.yoloworld || [],
+          total_detections: (evidence.yoloworld || []).length
+        }
+      case 'violence':
+        return {
+          stage: 'violence',
+          violence_segments: evidence.violence_segments || []
+        }
+      case 'audio_asr':
+        return {
+          stage: 'audio_asr',
+          full_text: result.transcript?.text || '',
+          chunks: result.transcript?.chunks || []
+        }
+      case 'ocr':
+        return {
+          stage: 'ocr',
+          texts: (evidence.ocr || []).map((o: any) => o.text),
+          total_detections: (evidence.ocr || []).length
+        }
+      case 'text_moderation':
+        return {
+          stage: 'text_moderation',
+          transcript_chunks_analyzed: result.transcript?.chunks?.length || 0,
+          ocr_items_analyzed: (evidence.ocr || []).length,
+          flagged_transcript: evidence.transcript_moderation || [],
+          flagged_ocr: evidence.ocr_moderation || []
+        }
+      case 'policy_fusion':
+        return {
+          stage: 'policy_fusion',
+          verdict: result.verdict,
+          scores: Object.fromEntries(
+            Object.entries(result.criteria || {}).map(([k, v]: [string, any]) => [k, v?.value || v || 0])
+          ),
+          violations: result.violations || []
+        }
+      case 'report':
+        return {
+          stage: 'report',
+          report_preview: result.report,
+          report_type: 'saved'
+        }
+      default:
+        return result
+    }
+  }
+
+  // Handle stage click - always fetch stage output from backend by video_id
+  const handleStageClick = async (stageId: string) => {
+    if (selectedStage === stageId) {
+      setSelectedStage(null)
+      setStageOutput(null)
+      return
+    }
+    
+    setSelectedStage(stageId)
+    
+    // Always fetch stage-specific output from backend using video_id
+    const videoId = selectedVideo?.batchVideoId || selectedVideo?.id
+    const stage = PIPELINE_STAGES.find(s => s.id === stageId)
+    
+    if (videoId && stage) {
+      await fetchStageOutput(videoId, stage.backendId)
+    } else if (selectedVideo?.result) {
+      // Fallback to result data if no video_id available
+      setStageOutput(selectedVideo.result)
+    }
+  }
+
+  // Check if a stage is clickable (completed or video is done)
+  const isStageClickable = (stageId: string, video: QueueVideo | null) => {
+    if (!video) return false
+    if (video.status === 'completed') return true
+    
+    // During processing, check if stage is completed
+    const stageIndex = PIPELINE_STAGES.findIndex(s => s.id === stageId)
+    const currentIndex = PIPELINE_STAGES.findIndex(s => s.id === video.currentStage)
+    return stageIndex < currentIndex
+  }
+
   // Note: Video URLs are now computed inline in the JSX to properly handle
   // local file vs backend URL fallback (matching index.html behavior)
 
@@ -660,7 +983,12 @@ const Pipeline: FC = () => {
       <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between flex-shrink-0">
         <span className="text-xs text-gray-500 tracking-widest">VIDEO QUEUE</span>
         <div className="flex items-center gap-2">
-          <button onClick={() => setShowUploadModal(true)} className="p-1.5 border border-gray-700 hover:border-white transition-all" title="Add"><Plus size={16} /></button>
+          <button onClick={() => setShowUploadModal(true)} className="p-1.5 border border-gray-700 hover:border-white transition-all" title="Add Video"><Plus size={16} /></button>
+          {queue.length > 0 && (
+            <button onClick={handleClearAll} className="p-1.5 border border-gray-700 hover:border-red-500 hover:text-red-500 transition-all" title="Clear All">
+              <Trash2 size={16} />
+            </button>
+          )}
           <button onClick={processAllVideos} disabled={processingBatch || queue.filter(v => v.status === 'queued' && v.file).length === 0} className="btn text-xs flex items-center gap-1.5 py-1.5 px-3">
             {processingBatch ? <><Loader2 size={12} className="animate-spin" /> PROCESSING</> : <><Play size={12} /> PROCESS</>}
           </button>
@@ -676,13 +1004,13 @@ const Pipeline: FC = () => {
             ) : (
               <div className="p-1">
                 {queue.map(video => (
-                  <div key={video.id} onClick={() => { selectVideo(video.id); setSelectedStage(null); setVideoError(false) }}
+                  <div key={video.id} onClick={() => { selectVideo(video.id); setSelectedStage(null); setStageOutput(null); setVideoError(false) }}
                     className={`p-2 cursor-pointer text-xs flex items-center justify-between group ${selectedVideoId === video.id ? 'bg-gray-900 border-l-2 border-white' : 'hover:bg-gray-900/50 border-l-2 border-transparent'}`}>
                     <span className="truncate flex-1 text-gray-400" title={video.filename}>{video.filename}</span>
                     <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100">
-                      {video.status === 'queued' && <button onClick={(e) => { e.stopPropagation(); processSingleVideo(video.id) }} className="p-0.5 text-green-500"><Play size={10} /></button>}
-                      {video.status === 'failed' && <button onClick={(e) => { e.stopPropagation(); retryVideo(video.id) }} className="p-0.5 text-yellow-500"><RotateCcw size={10} /></button>}
-                      <button onClick={(e) => { e.stopPropagation(); removeVideo(video.id) }} className="p-0.5 text-red-500"><X size={10} /></button>
+                      {video.status === 'queued' && <button onClick={(e) => { e.stopPropagation(); processSingleVideo(video.id) }} className="p-0.5 text-green-500" title="Process"><Play size={10} /></button>}
+                      {video.status === 'failed' && <button onClick={(e) => { e.stopPropagation(); retryVideo(video.id) }} className="p-0.5 text-yellow-500" title="Retry"><RotateCcw size={10} /></button>}
+                      <button onClick={(e) => { e.stopPropagation(); handleDeleteVideo(video.id, video) }} className="p-0.5 text-red-500 hover:text-red-400" title="Delete"><X size={10} /></button>
                     </div>
                     {video.status === 'processing' && <Loader2 size={10} className="animate-spin text-blue-400 ml-1" />}
                     {video.status === 'completed' && <Check size={10} className="text-green-400 ml-1" />}
@@ -702,19 +1030,19 @@ const Pipeline: FC = () => {
                 <div className="flex items-center gap-1.5 min-w-max">
                   {PIPELINE_STAGES.map((stage, idx) => {
                     const status = getStageStatus(stage.id, selectedVideo)
-                    const isClickable = status === 'completed' && selectedVideo.result
+                    const clickable = isStageClickable(stage.id, selectedVideo)
                     return (
                       <div key={stage.id} className="flex items-center gap-2">
-                        <button onClick={() => isClickable && setSelectedStage(selectedStage === stage.id ? null : stage.id)} disabled={!isClickable} className="flex flex-col items-center">
+                        <button onClick={() => clickable && handleStageClick(stage.id)} disabled={!clickable} className="flex flex-col items-center">
                           <div className={`w-9 h-9 rounded-full border-2 flex items-center justify-center text-xs transition-all ${
-                            selectedStage === stage.id ? 'border-white bg-white text-black' :
+                            selectedStage === stage.id ? 'border-blue-400 bg-blue-400 text-black ring-2 ring-blue-400/50' :
                             status === 'completed' ? 'border-white bg-white text-black' :
                             status === 'active' ? 'border-white bg-white text-black animate-pulse' :
                             status === 'error' ? 'border-red-500 text-red-400' : 'border-gray-700 text-gray-600'
-                          } ${isClickable ? 'cursor-pointer hover:opacity-80' : 'cursor-default'}`}>
+                          } ${clickable ? 'cursor-pointer hover:opacity-80' : 'cursor-default'}`}>
                             {status === 'completed' ? <Check size={14} /> : status === 'active' ? <Loader2 size={14} className="animate-spin" /> : status === 'error' ? <AlertCircle size={14} /> : stage.number}
                           </div>
-                          <span className={`text-[9px] mt-1 ${selectedStage === stage.id ? 'text-white' : 'text-gray-600'}`}>{stage.name}</span>
+                          <span className={`text-[9px] mt-1 ${selectedStage === stage.id ? 'text-blue-400' : status === 'completed' ? 'text-white' : 'text-gray-600'}`}>{stage.name}</span>
                         </button>
                         {idx < PIPELINE_STAGES.length - 1 && <div className={`w-4 h-px ${status === 'completed' ? 'bg-white' : 'bg-gray-800'}`} />}
                       </div>
@@ -750,18 +1078,16 @@ const Pipeline: FC = () => {
                         <video 
                           controls 
                           className="max-w-full max-h-full" 
+                          key={`${selectedVideo.id}-${videoType}`}
                           src={(() => {
+                            const vid = selectedVideo.batchVideoId || (selectedVideo.result as any)?.metadata?.video_id
+                            
                             if (videoType === 'original') {
-                              // Original: try local file first, then backend
-                              if (selectedVideo.file) {
-                                return URL.createObjectURL(selectedVideo.file)
-                              }
-                              // Fallback to backend uploaded video
-                              const vid = selectedVideo.batchVideoId || selectedVideo.result?.metadata?.video_id
+                              // Try local file first, then backend
+                              if (selectedVideo.file) return URL.createObjectURL(selectedVideo.file)
                               return vid ? videoApi.getUploadedVideoUrl(vid) : ''
                             } else {
-                              // Labeled: use backend
-                              const vid = selectedVideo.result?.metadata?.video_id || selectedVideo.batchVideoId
+                              // Labeled video from backend
                               return vid ? videoApi.getLabeledVideoUrl(vid) : ''
                             }
                           })()}
@@ -787,11 +1113,16 @@ const Pipeline: FC = () => {
                 <div className="flex flex-col bg-gray-900 border border-gray-800 overflow-hidden">
                   <div className="p-1.5 border-b border-gray-800 flex items-center justify-between">
                     <span className="text-[9px] text-gray-500 uppercase">{selectedStage ? PIPELINE_STAGES.find(s => s.id === selectedStage)?.name : 'Results'}</span>
-                    {selectedStage && <button onClick={() => setSelectedStage(null)} className="text-[9px] text-gray-600 hover:text-white">← Back</button>}
+                    {selectedStage && <button onClick={() => { setSelectedStage(null); setStageOutput(null) }} className="text-[9px] text-gray-600 hover:text-white">← Back</button>}
                   </div>
                   <div className="flex-1 overflow-y-auto p-2">
-                    {selectedStage && selectedVideo.result ? (
-                      generateStageContent(selectedStage, selectedVideo.result)
+                    {selectedStage && stageLoading ? (
+                      <div className="text-center py-6">
+                        <Loader2 size={20} className="mx-auto mb-1 animate-spin text-blue-400" />
+                        <p className="text-[10px] text-gray-600">Loading stage output...</p>
+                      </div>
+                    ) : selectedStage && stageOutput ? (
+                      generateStageContent(selectedStage, stageOutput)
                     ) : selectedVideo.status === 'completed' && selectedVideo.result ? (
                       <div className="space-y-2">
                         <div className={`p-3 border text-center ${
@@ -812,7 +1143,7 @@ const Pipeline: FC = () => {
                             ))}
                           </div>
                         )}
-                        <p className="text-[9px] text-gray-600 text-center">Click a stage above to see details</p>
+                        <p className="text-[9px] text-gray-600 text-center">Click any completed stage above to see its output</p>
                       </div>
                     ) : selectedVideo.status === 'processing' ? (
                       <div className="text-center py-6"><Loader2 size={20} className="mx-auto mb-1 animate-spin text-gray-700" /><p className="text-[10px] text-gray-600">{selectedVideo.currentStage?.replace(/_/g, ' ')} - {selectedVideo.progress}%</p></div>

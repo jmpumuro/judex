@@ -104,17 +104,11 @@ class ConnectionManager:
             self.disconnect(conn, video_id)
     
     async def send_complete(self, video_id: str):
-        """Send completion message and clear checkpoint."""
+        """Send completion message. Keep checkpoint for stage output viewing."""
         await self.send_progress(video_id, "complete", "Analysis complete", 100, save_checkpoint=False)
         
-        # Delete checkpoint on completion
-        try:
-            from app.utils.checkpoints import get_checkpoint_manager
-            checkpoint_manager = get_checkpoint_manager()
-            checkpoint_manager.delete_checkpoint(video_id)
-            logger.debug(f"Checkpoint cleared for completed video {video_id}")
-        except Exception as e:
-            logger.error(f"Failed to clear checkpoint for {video_id}: {e}")
+        # Don't delete checkpoint - keep stage outputs for later viewing
+        logger.debug(f"Video {video_id} completed - checkpoint preserved for stage output viewing")
         
         # Clean up metadata
         if video_id in self.video_metadata:

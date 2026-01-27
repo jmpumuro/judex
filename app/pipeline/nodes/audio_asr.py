@@ -6,7 +6,7 @@ from app.pipeline.state import PipelineState
 from app.core.logging import get_logger
 from app.models import get_whisper_asr
 from app.utils.ffmpeg import extract_audio
-from app.utils.progress import send_progress
+from app.utils.progress import send_progress, save_stage_output, format_stage_output
 
 logger = get_logger("node.asr")
 
@@ -65,5 +65,26 @@ def run_audio_asr(state: PipelineState) -> PipelineState:
         logger.error(f"Transcription failed: {e}")
         state["errors"] = state.get("errors", []) + [f"Transcription failed: {e}"]
         state["transcript"] = {"full_text": "", "chunks": []}
+    
+    # Save stage output for real-time retrieval
+    transcript = state.get("transcript", {})
+    chunks = transcript.get("chunks", [])
+    
+    save_stage_output(state.get("video_id"), "audio_asr", format_stage_output(
+        "audio_asr",
+        has_audio=has_audio,
+        full_text=transcript.get("full_text", "")[:500],  # First 500 chars
+        chunks_count=len(chunks),
+        # Include first 10 chunks for preview
+        chunks=[
+            {
+                "text": c.get("text", ""),
+                "start_time": c.get("start_time"),
+                "end_time": c.get("end_time")
+            }
+            for c in chunks[:10]
+        ],
+        total_duration=chunks[-1]["end_time"] if chunks else 0
+    ))
     
     return state

@@ -41,6 +41,14 @@ numpy==1.26.4
 # Logging
 colorlog==6.9.0
 
-# Task Queue
-celery==5.4.0
-redis==5.0.1
+# Database
+sqlalchemy==2.0.25
+psycopg2-binary==2.9.9
+alembic==1.13.1
+
+# Quantization for efficient LLM inference
+bitsandbytes==0.42.0
+scipy==1.11.4
+
+# Object Storage (MinIO/S3)
+minio==7.2.3

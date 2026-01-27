@@ -2,7 +2,6 @@ import { useState, useCallback } from 'react'
 import { useVideoStore } from '@/store/videoStore'
 import { videoApi } from '@/api/endpoints/videos'
 import toast from 'react-hot-toast'
-import { QueueVideo } from '@/types'
 
 export const useFileUpload = () => {
   const [isUploading, setIsUploading] = useState(false)
@@ -18,15 +17,13 @@ export const useFileUpload = () => {
     const toastId = toast.loading(`Uploading ${files.length} video(s)...`)
 
     try {
-      // Create queue entries
-      const queueVideos: QueueVideo[] = files.map(file => ({
-        id: `${file.name}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      // Create queue entries matching store's expected type
+      const queueVideos = files.map(file => ({
         filename: file.name,
-        size: file.size,
-        status: 'pending',
-        progress: 0,
         file,
-        uploaded_at: Date.now(),
+        status: 'queued' as const,
+        source: 'local' as const,
+        progress: 0,
       }))
 
       // Add to queue immediately

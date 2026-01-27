@@ -12,7 +12,7 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.utils.video import validate_video_file, create_working_directory
 from app.utils.ffmpeg import get_video_metadata, normalize_video
-from app.utils.progress import send_progress
+from app.utils.progress import send_progress, save_stage_output, format_stage_output
 
 logger = get_logger("node.ingest")
 
@@ -120,5 +120,18 @@ def ingest_video(state: PipelineState) -> PipelineState:
     state["errors"] = state.get("errors", [])
     
     logger.info(f"Video ingested: {video_id}, duration: {state['duration']:.2f}s, fps: {state['fps']}, resolution: {state['width']}x{state['height']}")
+    
+    # Save stage output for real-time retrieval
+    save_stage_output(video_id, "ingest", format_stage_output(
+        "ingest",
+        duration=state.get("duration"),
+        fps=state.get("fps"),
+        width=state.get("width"),
+        height=state.get("height"),
+        has_audio=state.get("has_audio"),
+        original_metadata=state.get("original_metadata"),
+        video_path=str(state.get("video_path")),
+        work_dir=str(state.get("work_dir"))
+    ))
     
     return state

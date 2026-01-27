@@ -8,7 +8,7 @@ import pytesseract
 from app.pipeline.state import PipelineState
 from app.core.logging import get_logger
 from app.utils.hashing import generate_ocr_id
-from app.utils.progress import send_progress
+from app.utils.progress import send_progress, save_stage_output, format_stage_output
 
 logger = get_logger("node.ocr")
 
@@ -135,5 +135,14 @@ def run_ocr(state: PipelineState) -> PipelineState:
     state["ocr_results"] = ocr_results
     
     logger.info(f"OCR completed: {frames_with_text}/{len(ocr_frames)} frames with text, {sum(r['detection_count'] for r in ocr_results)} total detections")
+    
+    # Save stage output for real-time retrieval
+    save_stage_output(state.get("video_id"), "ocr", format_stage_output(
+        "ocr",
+        frames_analyzed=len(ocr_frames),
+        frames_with_text=frames_with_text,
+        total_detections=sum(r['detection_count'] for r in ocr_results),
+        texts=[r['text'] for r in ocr_results[:10]]  # First 10 texts
+    ))
     
     return state

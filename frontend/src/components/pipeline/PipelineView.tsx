@@ -26,21 +26,19 @@ const stageDefinitions = [
 
 const PipelineView: FC<PipelineViewProps> = ({ video }) => {
   const { data: sseData } = useSSE(video.status === 'processing' ? video.id : null)
-  const updateVideoProgress = useVideoStore(state => state.updateVideoProgress)
-  const setVideoResult = useVideoStore(state => state.setVideoResult)
-  const setVideoStatus = useVideoStore(state => state.setVideoStatus)
+  const updateVideo = useVideoStore(state => state.updateVideo)
 
   // Handle SSE updates
   useEffect(() => {
     if (!sseData) return
 
-    updateVideoProgress(video.id, sseData.progress, sseData.stage)
+    updateVideo(video.id, { progress: sseData.progress, currentStage: sseData.stage })
 
     // Check for completion
     if (sseData.stage === 'complete' && sseData.stage_output) {
-      setVideoResult(video.id, sseData.stage_output)
+      updateVideo(video.id, { result: sseData.stage_output, status: 'completed' })
     }
-  }, [sseData, video.id, updateVideoProgress, setVideoResult])
+  }, [sseData, video.id, updateVideo])
 
   // Convert video progress to stage states
   const stages: PipelineStage[] = stageDefinitions.map((stageDef) => {

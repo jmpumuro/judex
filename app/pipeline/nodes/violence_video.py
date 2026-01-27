@@ -6,7 +6,7 @@ from app.pipeline.state import PipelineState
 from app.core.logging import get_logger
 from app.models import get_violence_detector
 from app.utils.hashing import generate_violence_id
-from app.utils.progress import send_progress
+from app.utils.progress import send_progress, save_stage_output, format_stage_output
 from app.utils.ffmpeg import create_labeled_video
 
 logger = get_logger("node.violence")
@@ -78,5 +78,31 @@ def run_violence_model(state: PipelineState) -> PipelineState:
         except Exception as e:
             logger.error(f"Failed to update labeled video with violence timeline: {e}")
             # Don't fail the pipeline if this fails
+    
+    # Save stage output for real-time retrieval
+    max_score = max([s["violence_score"] for s in violence_segments]) if violence_segments else 0
+    high_violence_segments = [s for s in violence_segments if s["violence_score"] > 0.5]
+    
+    save_stage_output(state.get("video_id"), "violence", format_stage_output(
+        "violence",
+        segments_analyzed=len(violence_segments),
+        max_violence_score=round(max_score, 3),
+        high_violence_count=len(high_violence_segments),
+        # Include high-scoring segments for preview
+        high_violence_segments=[
+            {
+                "start_time": s["start_time"],
+                "end_time": s["end_time"],
+                "score": round(s["violence_score"], 3),
+                "label": s.get("label")
+            }
+            for s in high_violence_segments
+        ],
+        # Summary per segment
+        segment_scores=[
+            {"index": s["segment_index"], "score": round(s["violence_score"], 3)}
+            for s in violence_segments
+        ]
+    ))
     
     return state

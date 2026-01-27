@@ -9,7 +9,7 @@ from typing import List, Dict, Any
 from app.pipeline.state import PipelineState
 from app.models import get_yoloworld_detector
 from app.core.logging import get_logger
-from app.utils.progress import send_progress
+from app.utils.progress import send_progress, save_stage_output, format_stage_output
 
 logger = get_logger("pipeline.yoloworld")
 
@@ -84,6 +84,16 @@ def run_yoloworld_vision(state: PipelineState) -> PipelineState:
         send_progress(state.get("progress_callback"), "yoloworld_vision", 
                      "YOLO-World detection complete", 35)
         state["current_stage"] = "yoloworld_vision_complete"
+        
+        # Save stage output for real-time retrieval
+        save_stage_output(state.get("video_id"), "yoloworld", format_stage_output(
+            "yoloworld",
+            total_detections=len(all_detections),
+            weapon_count=signals['weapon_count'],
+            violence_indicators=signals['violence_indicators'],
+            matched_prompts=signals['matched_prompts'],
+            detections=all_detections[:20]  # Limit to first 20 for storage
+        ))
         
         return state
         

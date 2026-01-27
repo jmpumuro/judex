@@ -1,63 +1,93 @@
 """
 LLM report generation node.
+
+Uses Qwen (local) or OpenAI (cloud) for generating safety reports.
 """
 import json
 from typing import Dict, Any
 from app.pipeline.state import PipelineState
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.utils.progress import send_progress
+from app.utils.progress import send_progress, save_stage_output, format_stage_output
 
 logger = get_logger("node.llm_report")
 
 
 def generate_llm_report(state: PipelineState) -> PipelineState:
-    """Generate human-friendly report using OpenAI LLM."""
+    """Generate human-friendly report using Qwen (local) or OpenAI (cloud)."""
     logger.info("=== LLM Report Node ===")
     
     send_progress(state.get("progress_callback"), "report_generation", "Generating analysis report", 92)
     
-    # Check if OpenAI API key is available
-    if not settings.openai_api_key:
-        logger.warning("No OpenAI API key, using template report")
-        state["report"] = _generate_template_report(state)
-        return state
+    # Prepare evidence summary
+    evidence_summary = _prepare_evidence_summary(state)
+    prompt = _create_llm_prompt(state, evidence_summary)
+    system_prompt = "You are a child safety analyst. Generate clear, concise reports about video content safety based on automated analysis evidence."
     
-    try:
-        import openai
-        client = openai.OpenAI(api_key=settings.openai_api_key)
-        
-        # Prepare structured evidence for LLM
-        evidence_summary = _prepare_evidence_summary(state)
-        
-        # Create prompt
-        prompt = _create_llm_prompt(state, evidence_summary)
-        
-        # Call OpenAI
-        response = client.chat.completions.create(
-            model=settings.openai_model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a child safety analyst. Generate clear, concise reports about video content safety based on automated analysis evidence."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            temperature=0.3,
-            max_tokens=1000
-        )
-        
-        report = response.choices[0].message.content
-        state["report"] = report
-        
-        logger.info("LLM report generated successfully")
-        
-    except Exception as e:
-        logger.error(f"LLM report generation failed: {e}")
-        state["report"] = _generate_template_report(state)
+    # Try Qwen first (local with 4-bit quantization), then OpenAI (cloud), then template
+    if settings.llm_provider == "qwen":
+        try:
+            from app.models import get_qwen_llm, unload_qwen_llm, free_memory_for_llm
+            
+            # Free memory from models that are done processing
+            logger.info("Freeing memory for Qwen LLM...")
+            free_memory_for_llm()
+            
+            qwen = get_qwen_llm()
+            
+            logger.info("Generating report with Qwen...")
+            report = qwen.generate(prompt, system_prompt=system_prompt)
+            state["report"] = report
+            logger.info("Qwen report generated successfully")
+            
+            # Unload Qwen immediately to free memory for next video
+            unload_qwen_llm()
+            
+            return state
+            
+        except Exception as e:
+            logger.warning(f"Qwen generation failed: {e}, falling back to OpenAI")
+            # Try to unload if it loaded partially
+            try:
+                from app.models import unload_qwen_llm
+                unload_qwen_llm()
+            except:
+                pass
+    
+    # Try OpenAI as fallback
+    if settings.openai_api_key:
+        try:
+            import openai
+            client = openai.OpenAI(api_key=settings.openai_api_key)
+            
+            logger.info("Generating report with OpenAI...")
+            response = client.chat.completions.create(
+                model=settings.openai_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                max_tokens=1000
+            )
+            
+            state["report"] = response.choices[0].message.content
+            logger.info("OpenAI report generated successfully")
+            return state
+            
+        except Exception as e:
+            logger.warning(f"OpenAI generation failed: {e}, using template")
+    
+    # Fallback to template report
+    logger.info("Using template report (no LLM available)")
+    state["report"] = _generate_template_report(state)
+    
+    # Save stage output for real-time retrieval
+    save_stage_output(state.get("video_id"), "report", format_stage_output(
+        "report",
+        report_type="template",
+        report_preview=state["report"][:500] if state["report"] else None
+    ))
     
     return state
 

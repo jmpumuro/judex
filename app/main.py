@@ -17,6 +17,31 @@ logger = get_logger("main")
 os.makedirs(settings.temp_dir, exist_ok=True)
 
 
+def init_database():
+    """Initialize database tables."""
+    try:
+        from app.db.connection import init_db
+        logger.info("Initializing database...")
+        init_db()
+        logger.info("✓ Database initialized")
+    except Exception as e:
+        logger.error(f"Database initialization failed: {e}")
+        logger.warning("Database features may not work correctly")
+
+
+def init_storage():
+    """Initialize MinIO object storage."""
+    try:
+        from app.utils.storage import get_storage_service
+        logger.info(f"Initializing MinIO storage ({settings.minio_endpoint})...")
+        storage = get_storage_service()
+        storage.initialize()
+        logger.info("✓ MinIO storage initialized")
+    except Exception as e:
+        logger.error(f"MinIO storage initialization failed: {e}")
+        logger.warning("File storage will fall back to local filesystem")
+
+
 def preload_models():
     """Pre-load all models at startup using the model registry (singletons)."""
     import threading
@@ -40,6 +65,14 @@ async def lifespan(app: FastAPI):
     logger.info("Starting SafeVid service")
     logger.info(f"Models cache: {settings.hf_home}")
     logger.info(f"Temp directory: {settings.temp_dir}")
+    logger.info(f"Database: {settings.database_url.split('@')[1] if '@' in settings.database_url else 'configured'}")
+    logger.info(f"MinIO: {settings.minio_endpoint}")
+    
+    # Initialize database
+    init_database()
+    
+    # Initialize MinIO storage
+    init_storage()
     
     # Pre-load models in background to warm up
     preload_models()

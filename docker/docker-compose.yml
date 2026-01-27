@@ -11,13 +11,28 @@ services:
       # Model configuration
       - YOLO26_MODEL_ID=openvision/yolo26-s
       - VIOLENCE_MODEL_ID=microsoft/xclip-base-patch32-16-frames
-      - WHISPER_MODEL_ID=openai/whisper-small
+      - WHISPER_MODEL_ID=openai/whisper-tiny
       - PROFANITY_MODEL_ID=tarekziade/pardonmyai
       - NLI_MODEL_ID=facebook/bart-large-mnli
       
-      # OpenAI (optional, for LLM reports)
+      # LLM for reports (template mode - Qwen disabled due to memory)
+      - LLM_PROVIDER=template
+      - QWEN_MODEL_ID=Qwen/Qwen2.5-0.5B-Instruct
+      
+      # OpenAI (optional fallback for LLM reports)
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - OPENAI_MODEL=gpt-4o-mini
+      
+      # Database (PostgreSQL)
+      - DATABASE_URL=postgresql://docker:docker@host.docker.internal:5432/safevid
+      
+      # MinIO Object Storage
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_EXTERNAL_ENDPOINT=localhost:9000
+      - MINIO_ACCESS_KEY=safevid
+      - MINIO_SECRET_KEY=safevid123
+      - MINIO_BUCKET=safevid
+      - MINIO_SECURE=false
       
       # Cache directories
       - HF_HOME=/models/hf
@@ -32,29 +47,57 @@ services:
       - OCR_INTERVAL_SEC=2.0
     
     volumes:
-      # Persist model cache
-      - model_cache:/models
+      # Persist model cache on LOCAL DISK (not Docker volume)
+      # Models are downloaded once and reused across container rebuilds
+      - ~/.cache/safevid/models:/models
       # Temporary processing directory
       - temp_data:/tmp/safevid
-      # Persistent results data
+      # Local fallback data
       - results_data:/data/safevid
+    
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    
+    depends_on:
+      minio:
+        condition: service_healthy
     
     restart: unless-stopped
     
-    # Resource limits
+    # Resource limits - need ~12GB for all ML models
     deploy:
       resources:
         limits:
           cpus: '4'
-          memory: 8G
+          memory: 12G
         reservations:
           cpus: '2'
-          memory: 4G
+          memory: 8G
+
+  # MinIO Object Storage (S3-compatible)
+  minio:
+    image: minio/minio:latest
+    container_name: safevid-minio
+    ports:
+      - "9000:9000"   # API
+      - "9001:9001"   # Console
+    environment:
+      - MINIO_ROOT_USER=safevid
+      - MINIO_ROOT_PASSWORD=safevid123
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
 
 volumes:
-  model_cache:
-    driver: local
   temp_data:
     driver: local
   results_data:
+    driver: local
+  minio_data:
     driver: local

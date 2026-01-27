@@ -5,7 +5,7 @@ from app.pipeline.state import PipelineState
 from app.core.logging import get_logger
 from app.models import get_text_moderator
 from app.utils.hashing import generate_asr_id
-from app.utils.progress import send_progress
+from app.utils.progress import send_progress, save_stage_output, format_stage_output
 
 logger = get_logger("node.text_moderation")
 
@@ -81,5 +81,44 @@ def run_text_moderation(state: PipelineState) -> PipelineState:
     state["ocr_moderation"] = ocr_moderation
     
     logger.info(f"Text moderation completed: {len(transcript_moderation)} transcript + {len(ocr_moderation)} OCR")
+    
+    # Save stage output for real-time retrieval
+    # Find flagged content
+    flagged_transcript = [
+        m for m in transcript_moderation 
+        if any([m.get("profanity_score", 0) > 0.5, m.get("violence_score", 0) > 0.5,
+                m.get("sexual_score", 0) > 0.5, m.get("drugs_score", 0) > 0.5, m.get("hate_score", 0) > 0.5])
+    ]
+    flagged_ocr = [
+        m for m in ocr_moderation
+        if any([m.get("profanity_score", 0) > 0.5, m.get("violence_score", 0) > 0.5,
+                m.get("sexual_score", 0) > 0.5, m.get("drugs_score", 0) > 0.5, m.get("hate_score", 0) > 0.5])
+    ]
+    
+    save_stage_output(state.get("video_id"), "text_moderation", format_stage_output(
+        "text_moderation",
+        transcript_chunks_analyzed=len(transcript_moderation),
+        ocr_items_analyzed=len(ocr_moderation),
+        flagged_transcript_count=len(flagged_transcript),
+        flagged_ocr_count=len(flagged_ocr),
+        # Include flagged items for preview
+        flagged_transcript=[
+            {
+                "text": m.get("text", "")[:100],
+                "start_time": m.get("start_time"),
+                "end_time": m.get("end_time"),
+                "profanity": round(m.get("profanity_score", 0), 3),
+                "violence": round(m.get("violence_score", 0), 3)
+            }
+            for m in flagged_transcript[:5]
+        ],
+        flagged_ocr=[
+            {
+                "text": m.get("text", "")[:100],
+                "timestamp": m.get("timestamp")
+            }
+            for m in flagged_ocr[:5]
+        ]
+    ))
     
     return state
