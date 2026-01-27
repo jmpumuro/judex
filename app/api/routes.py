@@ -36,6 +36,11 @@ router = APIRouter()
 batch_jobs = {}
 batch_results = {}
 
+# Semaphore to limit concurrent video processing to ONE at a time
+# This prevents OOM crashes when processing multiple videos
+import asyncio
+_processing_semaphore = asyncio.Semaphore(1)
+
 # Persistent temp storage for uploaded videos (for checkpoint recovery)
 UPLOADS_DIR = Path(settings.data_dir) / "uploads"
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
@@ -367,83 +372,98 @@ async def evaluate_video_with_tracking(
 
 
 async def process_video_in_batch(video_path: Path, video_id: str, batch_id: str, policy_config: dict):
-    """Process a single video in a batch."""
-    try:
-        # Safety check: ensure video exists in batch_jobs
-        if batch_id not in batch_jobs:
-            logger.error(f"Batch {batch_id} not found in batch_jobs")
-            return
+    """Process a single video in a batch with semaphore protection."""
+    # Acquire semaphore to ensure only ONE video processes at a time
+    async with _processing_semaphore:
+        logger.info(f"Semaphore acquired for video {video_id} - starting processing")
         
-        if video_id not in batch_jobs[batch_id]["videos"]:
-            logger.error(f"Video {video_id} not found in batch {batch_id}")
-            return
-        
-        # Update status
-        batch_jobs[batch_id]["videos"][video_id]["status"] = "processing"
-        await manager.send_batch_update(batch_id, batch_jobs[batch_id])
-        
-        # Set video metadata for checkpoint saving
-        video_data = batch_jobs[batch_id]["videos"][video_id]
-        manager.set_video_metadata(video_id, {
-            "batch_video_id": video_data.get("batch_video_id"),
-            "filename": video_data.get("filename"),
-            "duration": None  # Will be updated during processing
-        })
-        
-        # Run pipeline
-        result = await run_pipeline(str(video_path), policy_config, video_id)
-        
-        # Update with results
-        batch_jobs[batch_id]["videos"][video_id]["status"] = "completed"
-        batch_jobs[batch_id]["videos"][video_id]["verdict"] = result["verdict"]
-        batch_jobs[batch_id]["videos"][video_id]["progress"] = 100
-        batch_jobs[batch_id]["videos"][video_id]["result"] = result
-        batch_jobs[batch_id]["completed"] += 1
-        
-        # Clear checkpoint on successful completion
-        checkpoint_manager = get_checkpoint_manager()
-        checkpoint_manager.delete_checkpoint(video_id)
-        
-    except Exception as e:
-        logger.error(f"Failed to process video {video_id}: {e}")
-        # Safety check before updating
-        if batch_id in batch_jobs and video_id in batch_jobs[batch_id]["videos"]:
-            batch_jobs[batch_id]["videos"][video_id]["status"] = "failed"
-            batch_jobs[batch_id]["videos"][video_id]["error"] = str(e)
-            batch_jobs[batch_id]["videos"][video_id]["progress"] = 100
-            batch_jobs[batch_id]["completed"] += 1
-            # Keep checkpoint for failed videos so they can be retried
-    
-    finally:
-        # Safety check before finalizing
-        if batch_id in batch_jobs:
-            # Check if batch is complete
-            if batch_jobs[batch_id]["completed"] == batch_jobs[batch_id]["total"]:
-                batch_jobs[batch_id]["status"] = "completed"
+        try:
+            # Safety check: ensure video exists in batch_jobs
+            if batch_id not in batch_jobs:
+                logger.error(f"Batch {batch_id} not found in batch_jobs")
+                return
             
+            if video_id not in batch_jobs[batch_id]["videos"]:
+                logger.error(f"Video {video_id} not found in batch {batch_id}")
+                return
+            
+            # Update status
+            batch_jobs[batch_id]["videos"][video_id]["status"] = "processing"
             await manager.send_batch_update(batch_id, batch_jobs[batch_id])
+            
+            # Set video metadata for checkpoint saving
+            video_data = batch_jobs[batch_id]["videos"][video_id]
+            manager.set_video_metadata(video_id, {
+                "batch_video_id": video_data.get("batch_video_id"),
+                "filename": video_data.get("filename"),
+                "duration": None  # Will be updated during processing
+            })
+            
+            # Run pipeline (models already loaded at startup)
+            result = await run_pipeline(str(video_path), policy_config, video_id)
+            
+            # Update with results
+            batch_jobs[batch_id]["videos"][video_id]["status"] = "completed"
+            batch_jobs[batch_id]["videos"][video_id]["verdict"] = result["verdict"]
+            batch_jobs[batch_id]["videos"][video_id]["progress"] = 100
+            batch_jobs[batch_id]["videos"][video_id]["result"] = result
+            batch_jobs[batch_id]["completed"] += 1
+            
+            # Clear checkpoint on successful completion
+            checkpoint_manager = get_checkpoint_manager()
+            checkpoint_manager.delete_checkpoint(video_id)
+            
+            logger.info(f"Video {video_id} completed: verdict={result['verdict']}")
+            
+        except Exception as e:
+            logger.error(f"Failed to process video {video_id}: {e}")
+            # Safety check before updating
+            if batch_id in batch_jobs and video_id in batch_jobs[batch_id]["videos"]:
+                batch_jobs[batch_id]["videos"][video_id]["status"] = "failed"
+                batch_jobs[batch_id]["videos"][video_id]["error"] = str(e)
+                batch_jobs[batch_id]["videos"][video_id]["progress"] = 100
+                batch_jobs[batch_id]["completed"] += 1
+        
+        finally:
+            # Safety check before finalizing
+            if batch_id in batch_jobs:
+                # Check if batch is complete
+                if batch_jobs[batch_id]["completed"] == batch_jobs[batch_id]["total"]:
+                    batch_jobs[batch_id]["status"] = "completed"
+                
+                await manager.send_batch_update(batch_id, batch_jobs[batch_id])
+            
+            logger.info(f"Semaphore released for video {video_id}")
 
 
 async def process_batch(batch_id: str, video_paths: List[Path], policy_config: dict):
-    """Process all videos in a batch."""
-    tasks = []
+    """
+    Process all videos in a batch.
     
-    # Get video_ids from batch_jobs to ensure we use the same IDs
+    Videos are queued concurrently but the semaphore ensures only ONE 
+    processes at a time, preventing OOM crashes while keeping the API responsive.
+    """
+    logger.info(f"Processing batch {batch_id} with {len(video_paths)} videos (semaphore-protected)")
+    
+    # Build video_id mapping
     video_id_map = {}
     for video_id, video_data in batch_jobs[batch_id]["videos"].items():
-        # Match by filename
         for video_path in video_paths:
             if video_path.name == video_data["filename"]:
                 video_id_map[str(video_path)] = video_id
                 break
     
+    # Create all tasks - they'll queue up on the semaphore
+    tasks = []
     for video_path in video_paths:
         video_id = video_id_map.get(str(video_path))
         if video_id:
+            logger.info(f"Queuing video {video_id} ({video_path.name})")
             tasks.append(process_video_in_batch(video_path, video_id, batch_id, policy_config))
         else:
             logger.error(f"Could not find video_id for {video_path.name}")
     
+    # Run all tasks - semaphore ensures sequential execution
     await asyncio.gather(*tasks)
 
 

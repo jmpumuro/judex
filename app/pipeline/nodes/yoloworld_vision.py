@@ -7,24 +7,11 @@ object detection based on policy requirements.
 from pathlib import Path
 from typing import List, Dict, Any
 from app.pipeline.state import PipelineState
-from app.models.yoloworld import YOLOWorldDetector
+from app.models import get_yoloworld_detector
 from app.core.logging import get_logger
 from app.utils.progress import send_progress
 
 logger = get_logger("pipeline.yoloworld")
-
-# Singleton detector instance
-_detector_instance = None
-
-
-def get_detector() -> YOLOWorldDetector:
-    """Get or create YOLO-World detector instance."""
-    global _detector_instance
-    if _detector_instance is None:
-        _detector_instance = YOLOWorldDetector()
-        _detector_instance.load()
-        logger.info("YOLO-World detector loaded for batch pipeline")
-    return _detector_instance
 
 
 def run_yoloworld_vision(state: PipelineState) -> PipelineState:
@@ -46,8 +33,8 @@ def run_yoloworld_vision(state: PipelineState) -> PipelineState:
     send_progress(state.get("progress_callback"), "yoloworld_vision", "Starting YOLO-World detection", 25)
     
     try:
-        # Get detector
-        detector = get_detector()
+        # Get detector from model registry (singleton)
+        detector = get_yoloworld_detector()
         
         # Get sampled frames
         sampled_frames = state.get("sampled_frames", [])

@@ -38,11 +38,11 @@ def ingest_video(state: PipelineState) -> PipelineState:
         state["errors"] = state.get("errors", []) + ["Invalid video file"]
         return state
     
-    # Generate video ID
-    video_id = str(uuid.uuid4())
+    # Use existing video_id from state (passed from API) or generate new one
+    video_id = state.get("video_id") or str(uuid.uuid4())
     state["video_id"] = video_id
     
-    # Create working directory
+    # Create working directory using the video_id
     work_dir = create_working_directory(settings.temp_dir, video_id)
     state["work_dir"] = work_dir
     

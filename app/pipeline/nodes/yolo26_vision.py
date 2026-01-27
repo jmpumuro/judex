@@ -4,25 +4,12 @@ YOLO26 vision detection node.
 from pathlib import Path
 from app.pipeline.state import PipelineState
 from app.core.logging import get_logger
-from app.models.yolo26 import YOLO26Detector
+from app.models import get_yolo26_detector
 from app.utils.hashing import generate_vision_id
 from app.utils.progress import send_progress
 from app.utils.ffmpeg import create_labeled_video
 
 logger = get_logger("node.yolo26")
-
-
-# Singleton detector instance
-_detector = None
-
-
-def get_detector() -> YOLO26Detector:
-    """Get or create YOLO26 detector instance."""
-    global _detector
-    if _detector is None:
-        _detector = YOLO26Detector()
-        _detector.load()
-    return _detector
 
 
 def run_yolo26_vision(state: PipelineState) -> PipelineState:
@@ -37,7 +24,7 @@ def run_yolo26_vision(state: PipelineState) -> PipelineState:
         logger.warning("No sampled frames available")
         return state
     
-    detector = get_detector()
+    detector = get_yolo26_detector()
     
     send_progress(state.get("progress_callback"), "yolo26_vision", f"Detecting objects in {len(sampled_frames)} frames", 50)
     

@@ -40,3 +40,7 @@ numpy==1.26.4
 
 # Logging
 colorlog==6.9.0
+
+# Task Queue
+celery==5.4.0
+redis==5.0.1

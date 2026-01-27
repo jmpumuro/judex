@@ -3,24 +3,11 @@ Text moderation node for transcript and OCR text.
 """
 from app.pipeline.state import PipelineState
 from app.core.logging import get_logger
-from app.models.moderation import TextModerator
+from app.models import get_text_moderator
 from app.utils.hashing import generate_asr_id
 from app.utils.progress import send_progress
 
 logger = get_logger("node.text_moderation")
-
-
-# Singleton moderator instance
-_moderator = None
-
-
-def get_moderator() -> TextModerator:
-    """Get or create text moderator instance."""
-    global _moderator
-    if _moderator is None:
-        _moderator = TextModerator()
-        _moderator.load()
-    return _moderator
 
 
 def run_text_moderation(state: PipelineState) -> PipelineState:
@@ -32,7 +19,7 @@ def run_text_moderation(state: PipelineState) -> PipelineState:
     transcript = state.get("transcript", {})
     ocr_results = state.get("ocr_results", [])
     
-    moderator = get_moderator()
+    moderator = get_text_moderator()
     
     # Moderate transcript chunks
     transcript_moderation = []

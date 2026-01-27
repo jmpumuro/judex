@@ -4,24 +4,11 @@ Audio ASR transcription node.
 from pathlib import Path
 from app.pipeline.state import PipelineState
 from app.core.logging import get_logger
-from app.models.whisper_asr import WhisperASR
+from app.models import get_whisper_asr
 from app.utils.ffmpeg import extract_audio
 from app.utils.progress import send_progress
 
 logger = get_logger("node.asr")
-
-
-# Singleton ASR instance
-_asr = None
-
-
-def get_asr() -> WhisperASR:
-    """Get or create Whisper ASR instance."""
-    global _asr
-    if _asr is None:
-        _asr = WhisperASR()
-        _asr.load()
-    return _asr
 
 
 def run_audio_asr(state: PipelineState) -> PipelineState:
@@ -60,7 +47,7 @@ def run_audio_asr(state: PipelineState) -> PipelineState:
             return state
     
     # Transcribe audio
-    asr = get_asr()
+    asr = get_whisper_asr()
     
     send_progress(state.get("progress_callback"), "audio_transcription", "Transcribing audio with Whisper", 70)
     

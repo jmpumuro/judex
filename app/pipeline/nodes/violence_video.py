@@ -3,33 +3,13 @@ Violence detection node.
 """
 from pathlib import Path
 from app.pipeline.state import PipelineState
-from app.core.config import settings
 from app.core.logging import get_logger
+from app.models import get_violence_detector
 from app.utils.hashing import generate_violence_id
 from app.utils.progress import send_progress
 from app.utils.ffmpeg import create_labeled_video
 
 logger = get_logger("node.violence")
-
-
-# Singleton detector instance
-_detector = None
-
-
-def get_detector():
-    """Get or create violence detector instance."""
-    global _detector
-    if _detector is None:
-        if settings.use_xclip_violence:
-            from app.models.violence_xclip import XCLIPViolenceDetector
-            _detector = XCLIPViolenceDetector()
-            logger.info("Using X-CLIP violence detector")
-        else:
-            from app.models.violence import ViolenceDetector
-            _detector = ViolenceDetector()
-            logger.info("Using VideoMAE violence detector")
-        _detector.load()
-    return _detector
 
 
 def run_violence_model(state: PipelineState) -> PipelineState:
@@ -44,7 +24,7 @@ def run_violence_model(state: PipelineState) -> PipelineState:
         logger.warning("No video segments available")
         return state
     
-    detector = get_detector()
+    detector = get_violence_detector()
     
     send_progress(state.get("progress_callback"), "violence_detection", f"Analyzing {len(segments)} video segments", 60)
     

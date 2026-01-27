@@ -38,21 +38,32 @@ def prefetch_yolo26():
     model_id = settings.yolo26_model_id
     logger.info(f"Prefetching YOLO26: {model_id}")
     
-    # For YOLO models, we may need ultralytics
     try:
         from ultralytics import YOLO
-        # This will download the model
         if "yolo11" in model_id.lower() or not "/" in model_id:
-            # Standard ultralytics model
             model = YOLO(model_id)
         else:
-            # Try HF download
             prefetch_model(model_id, "yolo26")
         logger.info("✓ YOLO26 model ready")
         return True
     except Exception as e:
         logger.warning(f"YOLO26 prefetch issue: {e}")
-        # Continue anyway, will be handled at runtime
+        return True
+
+
+def prefetch_yoloworld():
+    """Prefetch YOLO-World model for open-vocabulary detection."""
+    model_id = "yolov8s-worldv2.pt"
+    logger.info(f"Prefetching YOLO-World: {model_id}")
+    
+    try:
+        from ultralytics import YOLO
+        # Download the YOLO-World model
+        model = YOLO(model_id)
+        logger.info("✓ YOLO-World model ready")
+        return True
+    except Exception as e:
+        logger.warning(f"YOLO-World prefetch issue: {e}")
         return True
 
 
@@ -84,9 +95,13 @@ def main():
         if prefetch_model(model_id, model_type):
             success_count += 1
     
-    # YOLO separately
+    # YOLO models separately (ultralytics)
     total_count += 1
     if prefetch_yolo26():
+        success_count += 1
+    
+    total_count += 1
+    if prefetch_yoloworld():
         success_count += 1
     
     logger.info("=" * 60)

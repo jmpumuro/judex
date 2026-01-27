@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   safevid:
     build:
@@ -12,7 +10,7 @@ services:
     environment:
       # Model configuration
       - YOLO26_MODEL_ID=openvision/yolo26-s
-      - VIOLENCE_MODEL_ID=Nikeytas/videomae-crime-detector-production-v1
+      - VIOLENCE_MODEL_ID=microsoft/xclip-base-patch32-16-frames
       - WHISPER_MODEL_ID=openai/whisper-small
       - PROFANITY_MODEL_ID=tarekziade/pardonmyai
       - NLI_MODEL_ID=facebook/bart-large-mnli
@@ -43,7 +41,7 @@ services:
     
     restart: unless-stopped
     
-    # Resource limits (adjust based on your needs)
+    # Resource limits
     deploy:
       resources:
         limits:
