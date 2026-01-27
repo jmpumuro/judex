@@ -1,0 +1,62 @@
+version: '3.8'
+
+services:
+  safevid:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: safevid:latest
+    container_name: safevid
+    ports:
+      - "8012:8000"
+    environment:
+      # Model configuration
+      - YOLO26_MODEL_ID=openvision/yolo26-s
+      - VIOLENCE_MODEL_ID=Nikeytas/videomae-crime-detector-production-v1
+      - WHISPER_MODEL_ID=openai/whisper-small
+      - PROFANITY_MODEL_ID=tarekziade/pardonmyai
+      - NLI_MODEL_ID=facebook/bart-large-mnli
+      
+      # OpenAI (optional, for LLM reports)
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_MODEL=gpt-4o-mini
+      
+      # Cache directories
+      - HF_HOME=/models/hf
+      - TRANSFORMERS_CACHE=/models/hf/transformers
+      - TEMP_DIR=/tmp/safevid
+      - DATA_DIR=/data/safevid
+      
+      # Processing settings
+      - DEFAULT_SAMPLING_FPS=1.0
+      - SEGMENT_DURATION_SEC=3.0
+      - VIOLENCE_FRAMES_PER_SEGMENT=16
+      - OCR_INTERVAL_SEC=2.0
+    
+    volumes:
+      # Persist model cache
+      - model_cache:/models
+      # Temporary processing directory
+      - temp_data:/tmp/safevid
+      # Persistent results data
+      - results_data:/data/safevid
+    
+    restart: unless-stopped
+    
+    # Resource limits (adjust based on your needs)
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+        reservations:
+          cpus: '2'
+          memory: 4G
+
+volumes:
+  model_cache:
+    driver: local
+  temp_data:
+    driver: local
+  results_data:
+    driver: local

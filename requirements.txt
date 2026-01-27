@@ -1,0 +1,42 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.5
+pydantic-settings==2.7.0
+websockets==14.1
+
+# ML/AI frameworks
+torch==2.5.1
+transformers==4.47.1
+ultralytics==8.3.52
+git+https://github.com/openai/CLIP.git
+
+# HuggingFace
+huggingface-hub==0.27.0
+accelerate==1.2.1
+
+# Video processing
+opencv-python-headless==4.10.0.84
+
+# Audio processing
+librosa==0.10.2.post1
+soundfile==0.12.1
+
+# OCR
+pytesseract==0.3.10
+
+# LangGraph
+langgraph==0.2.59
+langchain-core==0.3.29
+
+# OpenAI (optional)
+openai==1.59.5
+
+# Utilities
+python-multipart==0.0.20
+requests==2.32.3
+aiohttp==3.11.11
+Pillow==11.0.0
+numpy==1.26.4
+
+# Logging
+colorlog==6.9.0
