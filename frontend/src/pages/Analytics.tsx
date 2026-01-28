@@ -15,11 +15,16 @@ const Analytics: FC = () => {
     let avgViolence = 0, avgProfanity = 0, avgDrugs = 0, count = 0
 
     completed.forEach(v => {
-      if (v.result?.criteria) {
-        const criteria = v.result.criteria
-        avgViolence += (criteria.violence?.score || criteria.violence || 0)
-        avgProfanity += (criteria.profanity?.score || criteria.profanity || 0)
-        avgDrugs += (criteria.drugs?.score || criteria.drugs || 0)
+      if (v.result?.criteria || v.result?.criteria_scores) {
+        const criteria = v.result.criteria_scores || v.result.criteria || {}
+        const getScore = (val: any): number => {
+          if (typeof val === 'number') return val
+          if (typeof val === 'object' && val !== null) return val.score || val.value || 0
+          return 0
+        }
+        avgViolence += getScore((criteria as any).violence)
+        avgProfanity += getScore((criteria as any).profanity)
+        avgDrugs += getScore((criteria as any).drugs)
         count++
       }
     })

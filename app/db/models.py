@@ -1,12 +1,12 @@
 """
 SQLAlchemy database models for SafeVid.
 
-Industry-standard schema with proper relationships:
-- Video: Main entity, represents uploaded videos
-- VideoResult: Analysis results (one-to-one with Video)
-- Evidence: Detection evidence (many-to-one with VideoResult)
-- Checkpoint: Processing checkpoints for resumable processing
-- ArchivedCheckpoint: Archived checkpoints for completed videos
+Evaluation-centric schema:
+- Evaluation: Primary entity - represents an evaluation request
+- EvaluationItem: Videos being evaluated (many-to-one with Evaluation)
+- EvaluationResult: Analysis results for an item
+- EvaluationEvidence: Detection evidence (many-to-one with EvaluationResult)
+- Criteria: Saved criteria configurations
 - LiveEvent: Real-time detection events from live feeds
 """
 from datetime import datetime
@@ -17,12 +17,18 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship, declarative_base
 import enum
+import uuid
 
 Base = declarative_base()
 
 
-class VideoStatus(str, enum.Enum):
-    """Video processing status."""
+def generate_uuid() -> str:
+    """Generate a short UUID."""
+    return str(uuid.uuid4())[:8]
+
+
+class EvaluationStatus(str, enum.Enum):
+    """Evaluation processing status."""
     PENDING = "pending"
     PROCESSING = "processing"
     COMPLETED = "completed"
@@ -48,18 +54,88 @@ class EvidenceType(str, enum.Enum):
     MODERATION = "moderation"
 
 
-class Video(Base):
-    """Main video entity."""
-    __tablename__ = "videos"
+# =============================================================================
+# EVALUATION-CENTRIC MODELS
+# =============================================================================
+
+class Evaluation(Base):
+    """
+    Primary entity - represents an evaluation request.
     
-    id = Column(String(64), primary_key=True)  # UUID
-    filename = Column(String(255), nullable=False)
-    original_path = Column(Text, nullable=True)  # Original upload path (local)
+    An evaluation can process one or more videos with a specific criteria configuration.
+    Results are automatically persisted.
+    """
+    __tablename__ = "evaluations"
     
-    # MinIO object storage paths
-    uploaded_video_path = Column(String(512), nullable=True)  # MinIO path for original video
-    labeled_video_path = Column(String(512), nullable=True)   # MinIO path for labeled video
-    thumbnail_path = Column(String(512), nullable=True)       # MinIO path for thumbnail
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    
+    # Criteria used for this evaluation (references Criteria table - presets are seeded on startup)
+    criteria_id = Column(String(64), ForeignKey("criteria.id", ondelete="SET NULL"), nullable=True, index=True)
+    criteria_snapshot = Column(JSON, nullable=True)  # Snapshot of criteria at evaluation time
+    
+    # Processing info
+    status = Column(Enum(EvaluationStatus), default=EvaluationStatus.PENDING, index=True)
+    progress = Column(Integer, default=0)  # 0-100
+    current_stage = Column(String(50), nullable=True)
+    error_message = Column(Text, nullable=True)
+    
+    # Async processing
+    is_async = Column(Boolean, default=True)
+    
+    # Aggregate results (computed from items)
+    overall_verdict = Column(Enum(Verdict), nullable=True)
+    items_total = Column(Integer, default=0)
+    items_completed = Column(Integer, default=0)
+    items_failed = Column(Integer, default=0)
+    
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    
+    # Relationships
+    items = relationship("EvaluationItem", back_populates="evaluation", cascade="all, delete-orphan")
+    criteria_ref = relationship("Criteria", foreign_keys=[criteria_id])
+    
+    __table_args__ = (
+        Index('ix_evaluations_status_created', 'status', 'created_at'),
+    )
+    
+    def to_dict(self, include_items: bool = False) -> Dict[str, Any]:
+        result = {
+            "id": self.id,
+            "status": self.status.value if self.status else None,
+            "progress": self.progress,
+            "current_stage": self.current_stage,
+            "overall_verdict": self.overall_verdict.value if self.overall_verdict else None,
+            "items_total": self.items_total,
+            "items_completed": self.items_completed,
+            "items_failed": self.items_failed,
+            "criteria_id": self.criteria_id,
+            "is_async": self.is_async,
+            "error_message": self.error_message,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+        }
+        if include_items and self.items:
+            result["items"] = [item.to_dict() for item in self.items]
+        return result
+
+
+class EvaluationItem(Base):
+    """
+    A single video/item being evaluated within an Evaluation.
+    """
+    __tablename__ = "evaluation_items"
+    
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    evaluation_id = Column(String(36), ForeignKey("evaluations.id", ondelete="CASCADE"), nullable=False)
+    
+    # Source info
+    source_type = Column(String(20), default="upload")  # upload, url, storage
+    source_path = Column(Text, nullable=True)  # Original path/URL
+    filename = Column(String(255), nullable=True)
     
     # Video metadata
     duration = Column(Float, nullable=True)
@@ -67,207 +143,183 @@ class Video(Base):
     width = Column(Integer, nullable=True)
     height = Column(Integer, nullable=True)
     has_audio = Column(Boolean, default=False)
-    file_size = Column(Integer, nullable=True)  # bytes
+    file_size = Column(Integer, nullable=True)
     
-    # Processing info
-    status = Column(Enum(VideoStatus), default=VideoStatus.PENDING, index=True)
-    batch_id = Column(String(64), nullable=True, index=True)
-    source = Column(String(50), default="upload")  # upload, url, storage, database
+    # Processing status
+    status = Column(Enum(EvaluationStatus), default=EvaluationStatus.PENDING, index=True)
+    progress = Column(Integer, default=0)
+    current_stage = Column(String(50), nullable=True)
+    error_message = Column(Text, nullable=True)
+    
+    # Stage tracking (internal)
+    stage_states = Column(JSON, default=dict)
+    stage_outputs = Column(JSON, default=dict)
+    
+    # Artifacts (MinIO paths)
+    uploaded_video_path = Column(String(512), nullable=True)
+    labeled_video_path = Column(String(512), nullable=True)
+    thumbnail_path = Column(String(512), nullable=True)
     
     # Timestamps
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    processed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
     
     # Relationships
-    result = relationship("VideoResult", back_populates="video", uselist=False, cascade="all, delete-orphan")
-    checkpoint = relationship("Checkpoint", back_populates="video", uselist=False, cascade="all, delete-orphan")
-    archived_checkpoint = relationship("ArchivedCheckpoint", back_populates="video", uselist=False, cascade="all, delete-orphan")
+    evaluation = relationship("Evaluation", back_populates="items")
+    result = relationship("EvaluationResult", back_populates="item", uselist=False, cascade="all, delete-orphan")
     
-    # Indexes
     __table_args__ = (
-        Index('ix_videos_status_created', 'status', 'created_at'),
-        Index('ix_videos_batch_status', 'batch_id', 'status'),
+        Index('ix_eval_items_eval_status', 'evaluation_id', 'status'),
     )
     
-    def to_dict(self) -> Dict[str, Any]:
-        return {
+    def to_dict(self, include_result: bool = True) -> Dict[str, Any]:
+        data = {
             "id": self.id,
+            "evaluation_id": self.evaluation_id,
             "filename": self.filename,
+            "source_type": self.source_type,
+            "status": self.status.value if self.status else None,
+            "progress": self.progress,
+            "current_stage": self.current_stage,
             "duration": self.duration,
-            "fps": self.fps,
             "width": self.width,
             "height": self.height,
             "has_audio": self.has_audio,
-            "status": self.status.value if self.status else None,
-            "batch_id": self.batch_id,
-            "source": self.source,
-            "uploaded_video_path": self.uploaded_video_path,
-            "labeled_video_path": self.labeled_video_path,
-            "thumbnail_path": self.thumbnail_path,
+            "error_message": self.error_message,
+            "artifacts": {
+                "uploaded_video": self.uploaded_video_path,
+                "labeled_video": self.labeled_video_path,
+                "thumbnail": self.thumbnail_path,
+            },
             "created_at": self.created_at.isoformat() if self.created_at else None,
-            "processed_at": self.processed_at.isoformat() if self.processed_at else None,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
         }
+        if include_result and self.result:
+            data["result"] = self.result.to_dict()
+        return data
 
 
-class VideoResult(Base):
-    """Analysis results for a video."""
-    __tablename__ = "video_results"
+class EvaluationResult(Base):
+    """Analysis results for an evaluation item."""
+    __tablename__ = "evaluation_results"
     
     id = Column(Integer, primary_key=True, autoincrement=True)
-    video_id = Column(String(64), ForeignKey("videos.id", ondelete="CASCADE"), unique=True, nullable=False)
+    item_id = Column(String(36), ForeignKey("evaluation_items.id", ondelete="CASCADE"), unique=True, nullable=False)
     
     # Verdict
     verdict = Column(Enum(Verdict), nullable=False, index=True)
+    confidence = Column(Float, default=0.0)
     
-    # Criterion scores (0-1)
-    violence_score = Column(Float, default=0.0)
-    profanity_score = Column(Float, default=0.0)
-    sexual_score = Column(Float, default=0.0)
-    drugs_score = Column(Float, default=0.0)
-    hate_score = Column(Float, default=0.0)
+    # Criterion scores (unified format JSON)
+    criteria_scores = Column(JSON, default=dict)
+    
+    # Violations
+    violations = Column(JSON, default=list)
     
     # Processing metadata
-    processing_time = Column(Float, nullable=True)  # seconds
-    models_used = Column(JSON, default=list)  # List of model IDs used
-    policy_config = Column(JSON, nullable=True)  # Policy config used
+    processing_time = Column(Float, nullable=True)
     
-    # Full result data (JSON blob for flexibility)
-    violations = Column(JSON, default=list)
+    # Additional outputs
     transcript = Column(JSON, nullable=True)
     report = Column(Text, nullable=True)
+    
+    # Evidence reference count (for quick access)
+    evidence_count = Column(Integer, default=0)
     
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationships
-    video = relationship("Video", back_populates="result")
-    evidence = relationship("Evidence", back_populates="result", cascade="all, delete-orphan")
-    
-    # Indexes
-    __table_args__ = (
-        Index('ix_results_verdict_created', 'verdict', 'created_at'),
-    )
+    item = relationship("EvaluationItem", back_populates="result")
+    evidence = relationship("EvaluationEvidence", back_populates="result", cascade="all, delete-orphan")
     
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "video_id": self.video_id,
+            "item_id": self.item_id,
             "verdict": self.verdict.value if self.verdict else None,
-            "criteria": {
-                "violence": self.violence_score,
-                "profanity": self.profanity_score,
-                "sexual": self.sexual_score,
-                "drugs": self.drugs_score,
-                "hate": self.hate_score,
-            },
-            "processing_time": self.processing_time,
+            "confidence": self.confidence,
+            "criteria": self.criteria_scores,
             "violations": self.violations,
+            "processing_time": self.processing_time,
+            "transcript": self.transcript,
             "report": self.report,
+            "evidence_count": self.evidence_count,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
 
-class Evidence(Base):
-    """Evidence items linked to video results."""
-    __tablename__ = "evidence"
+class EvaluationEvidence(Base):
+    """Evidence items linked to evaluation results."""
+    __tablename__ = "evaluation_evidence"
     
     id = Column(Integer, primary_key=True, autoincrement=True)
-    result_id = Column(Integer, ForeignKey("video_results.id", ondelete="CASCADE"), nullable=False)
+    result_id = Column(Integer, ForeignKey("evaluation_results.id", ondelete="CASCADE"), nullable=False)
     
     evidence_type = Column(Enum(EvidenceType), nullable=False, index=True)
     
     # Timing
-    timestamp = Column(Float, nullable=True)  # seconds into video
+    timestamp = Column(Float, nullable=True)
     start_time = Column(Float, nullable=True)
     end_time = Column(Float, nullable=True)
     
     # Detection data
     label = Column(String(100), nullable=True)
-    category = Column(String(50), nullable=True)  # weapon, substance, person, etc.
+    category = Column(String(50), nullable=True)
     confidence = Column(Float, nullable=True)
     
-    # Bounding box (for vision evidence)
+    # Bounding box
     bbox_x1 = Column(Float, nullable=True)
     bbox_y1 = Column(Float, nullable=True)
     bbox_x2 = Column(Float, nullable=True)
     bbox_y2 = Column(Float, nullable=True)
     
-    # Text content (for transcript/OCR)
+    # Text content
     text_content = Column(Text, nullable=True)
     
-    # Additional data (JSON for flexibility)
+    # Additional data
     extra_data = Column(JSON, nullable=True)
     
     # Relationship
-    result = relationship("VideoResult", back_populates="evidence")
+    result = relationship("EvaluationResult", back_populates="evidence")
     
-    # Indexes
     __table_args__ = (
-        Index('ix_evidence_type_timestamp', 'evidence_type', 'timestamp'),
+        Index('ix_eval_evidence_type_timestamp', 'evidence_type', 'timestamp'),
     )
 
 
-class Checkpoint(Base):
-    """Processing checkpoint for resumable video processing."""
-    __tablename__ = "checkpoints"
+class Criteria(Base):
+    """Saved criteria configurations."""
+    __tablename__ = "criteria"
     
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    video_id = Column(String(64), ForeignKey("videos.id", ondelete="CASCADE"), unique=True, nullable=False)
+    id = Column(String(64), primary_key=True)  # e.g., "child-safety", "custom-abc123"
+    name = Column(String(100), nullable=False)
+    description = Column(Text, nullable=True)
     
-    # Current stage
-    current_stage = Column(String(50), nullable=False)
-    progress = Column(Integer, default=0)  # 0-100
+    # Is this a built-in preset?
+    is_preset = Column(Boolean, default=False)
     
-    # Stage states (JSON blob) - tracking progress per stage
-    stage_states = Column(JSON, default=dict)
+    # The full criteria configuration
+    config = Column(JSON, nullable=False)
     
-    # Stage outputs (JSON blob) - actual output data from each completed stage
-    # This allows fetching intermediate results as stages complete
-    stage_outputs = Column(JSON, default=dict)
-    
-    # Partial results
-    partial_results = Column(JSON, nullable=True)
+    # Metadata
+    version = Column(String(20), default="1.0")
     
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
-    # Relationship
-    video = relationship("Video", back_populates="checkpoint")
-    
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "video_id": self.video_id,
-            "current_stage": self.current_stage,
-            "progress": self.progress,
-            "stage_states": self.stage_states,
-            "stage_outputs": self.stage_outputs,
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "is_preset": self.is_preset,
+            "config": self.config,
+            "version": self.version,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
-
-
-class ArchivedCheckpoint(Base):
-    """Archived checkpoint for completed videos (audit trail)."""
-    __tablename__ = "archived_checkpoints"
-    
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    video_id = Column(String(64), ForeignKey("videos.id", ondelete="CASCADE"), unique=True, nullable=False)
-    
-    # Final state
-    final_stage = Column(String(50), nullable=False)
-    total_processing_time = Column(Float, nullable=True)  # seconds
-    
-    # Complete stage history
-    stage_history = Column(JSON, default=list)  # List of {stage, start_time, end_time, status}
-    
-    # Final results snapshot
-    final_results = Column(JSON, nullable=True)
-    
-    # Timestamps
-    completed_at = Column(DateTime, default=datetime.utcnow)
-    
-    # Relationship
-    video = relationship("Video", back_populates="archived_checkpoint")
 
 
 class LiveEvent(Base):
@@ -294,7 +346,7 @@ class LiveEvent(Base):
     captured_at = Column(DateTime, default=datetime.utcnow)
     reviewed_at = Column(DateTime, nullable=True)
     
-    # Composite indexes (single-column indexes are implicit via index=True on Column)
+    # Composite indexes
     __table_args__ = (
         Index('ix_live_events_stream_captured', 'stream_id', 'captured_at'),
         Index('ix_live_events_reviewed_captured', 'reviewed', 'captured_at'),

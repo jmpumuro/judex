@@ -1,43 +1,37 @@
+/**
+ * Video Queue Store - Manages the queue of videos being evaluated.
+ * 
+ * This store handles:
+ * - Queue of videos pending/processing/completed
+ * - Progress tracking during evaluation
+ * - Selection state for the UI
+ */
 import { create } from 'zustand'
+import type { EvaluationStatus, Verdict, EvaluationResult } from '@/types/api'
 
-export type VideoStatus = 'queued' | 'processing' | 'completed' | 'failed'
-export type VideoSource = 'local' | 'url' | 'storage' | 'database'
-export type Verdict = 'SAFE' | 'CAUTION' | 'UNSAFE' | 'NEEDS_REVIEW'
+// ============================================================================
+// Types
+// ============================================================================
 
-export interface VideoResult {
-  verdict: Verdict
-  confidence: number
-  criteria: Record<string, any>
-  evidence: {
-    violence?: Array<{ start_time: number; end_time: number; violence_score: number }>
-    transcription?: Array<{ timestamp: number; text: string }>
-    ocr?: Array<{ timestamp: number; text: string }>
-    detections?: any[]
-  }
-  metadata?: {
-    duration: number
-    fps: number
-    width: number
-    height: number
-    has_audio: boolean
-  }
-  summary?: string
-  model_versions?: Record<string, string>
-}
+export type VideoSource = 'local' | 'url' | 'storage'
 
 export interface QueueVideo {
   id: string
   filename: string
   file: File | null
-  status: VideoStatus
+  status: EvaluationStatus
   source: VideoSource
   progress: number
   currentStage?: string
   statusMessage?: string
   verdict?: Verdict
   duration?: string
-  result?: VideoResult
-  batchVideoId?: string
+  result?: EvaluationResult
+  
+  // Evaluation tracking
+  evaluationId?: string    // ID of the evaluation this video belongs to
+  itemId?: string          // ID of this item within the evaluation (for batch)
+  
   error?: string
   uploadedAt: number
 }
@@ -52,100 +46,102 @@ interface VideoStore {
   addVideos: (videos: Omit<QueueVideo, 'id' | 'uploadedAt'>[]) => string[]
   updateVideo: (id: string, updates: Partial<QueueVideo>) => void
   removeVideo: (id: string) => void
+  clearQueue: () => void
   selectVideo: (id: string | null) => void
-  clearCompleted: () => void
+  getVideoById: (id: string) => QueueVideo | undefined
+  getVideoByItemId: (itemId: string) => QueueVideo | undefined
   setProcessingBatch: (processing: boolean) => void
   setCurrentBatchId: (batchId: string | null) => void
-  getVideoById: (id: string) => QueueVideo | undefined
-  getVideoByBatchId: (batchVideoId: string) => QueueVideo | undefined
-  loadSavedResults: (results: any[]) => void
 }
 
-const generateId = () => `vid_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+// ============================================================================
+// Store Implementation
+// ============================================================================
 
 export const useVideoStore = create<VideoStore>((set, get) => ({
   queue: [],
   selectedVideoId: null,
   processingBatch: false,
   currentBatchId: null,
-
+  
   addVideos: (videos) => {
-    const newVideos: QueueVideo[] = videos.map(v => ({
-      ...v,
-      id: generateId(),
-      uploadedAt: Date.now(),
-    }))
+    const ids: string[] = []
+    const newVideos = videos.map(video => {
+      const id = `video-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+      ids.push(id)
+      return {
+        ...video,
+        id,
+        uploadedAt: Date.now(),
+      }
+    })
     
     set(state => ({
       queue: [...state.queue, ...newVideos]
     }))
     
-    return newVideos.map(v => v.id)
+    return ids
   },
-
+  
   updateVideo: (id, updates) => {
     set(state => ({
-      queue: state.queue.map(v => 
-        v.id === id ? { ...v, ...updates } : v
+      queue: state.queue.map(video =>
+        video.id === id ? { ...video, ...updates } : video
       )
     }))
   },
-
+  
   removeVideo: (id) => {
     set(state => ({
-      queue: state.queue.filter(v => v.id !== id),
+      queue: state.queue.filter(video => video.id !== id),
       selectedVideoId: state.selectedVideoId === id ? null : state.selectedVideoId
     }))
   },
-
+  
+  clearQueue: () => {
+    set({ queue: [], selectedVideoId: null })
+  },
+  
   selectVideo: (id) => {
     set({ selectedVideoId: id })
   },
-
-  clearCompleted: () => {
-    set(state => ({
-      queue: state.queue.filter(v => v.status !== 'completed' && v.status !== 'failed')
-    }))
+  
+  getVideoById: (id) => {
+    return get().queue.find(video => video.id === id)
   },
-
+  
+  getVideoByItemId: (itemId) => {
+    return get().queue.find(video => video.itemId === itemId)
+  },
+  
   setProcessingBatch: (processing) => {
     set({ processingBatch: processing })
   },
-
+  
   setCurrentBatchId: (batchId) => {
     set({ currentBatchId: batchId })
   },
-
-  getVideoById: (id) => {
-    return get().queue.find(v => v.id === id)
-  },
-
-  getVideoByBatchId: (batchVideoId) => {
-    return get().queue.find(v => v.batchVideoId === batchVideoId)
-  },
-
-  loadSavedResults: (results) => {
-    set(state => {
-      const existingIds = new Set(state.queue.map(v => v.id))
-      const newVideos = results
-        .filter((r: any) => !existingIds.has(r.id))
-        .map((r: any) => ({
-          id: r.id,
-          filename: r.filename,
-          file: null,
-          status: r.status as VideoStatus,
-          source: 'local' as VideoSource,
-          progress: 100,
-          verdict: r.verdict,
-          duration: r.duration,
-          result: r.result,
-          batchVideoId: r.batchVideoId,
-          uploadedAt: r.timestamp ? new Date(r.timestamp).getTime() : Date.now(),
-        }))
-      
-      return {
-        queue: [...state.queue, ...newVideos]
-      }
-    })
-  },
 }))
+
+// ============================================================================
+// Selectors (for performance optimization)
+// ============================================================================
+
+export const selectSelectedVideo = (state: VideoStore) => 
+  state.queue.find(v => v.id === state.selectedVideoId)
+
+export const selectQueuedVideos = (state: VideoStore) => 
+  state.queue.filter(v => v.status === 'queued' || v.status === 'pending')
+
+export const selectProcessingVideos = (state: VideoStore) => 
+  state.queue.filter(v => v.status === 'processing')
+
+export const selectCompletedVideos = (state: VideoStore) => 
+  state.queue.filter(v => v.status === 'completed')
+
+export const selectFailedVideos = (state: VideoStore) => 
+  state.queue.filter(v => v.status === 'failed')
+
+// Re-export for backward compatibility
+export { type QueueVideo as VideoItem }
+export { type EvaluationStatus as VideoStatus } from '@/types/api'

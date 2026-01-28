@@ -1,12 +1,25 @@
 """
 SafeVid FastAPI application.
+
+API Structure (v1):
+- /v1/evaluate - Main evaluation endpoint
+- /v1/evaluations/* - Evaluation management
+- /v1/criteria/* - Criteria/preset management
+- /v1/live/* - Live feed analysis
+
+Legacy endpoints (deprecated):
+- /v1/evaluate/batch, /v1/evaluate/generic - Use /v1/evaluate
+- /v1/presets/* - Use /v1/criteria/presets
+- /v1/results/*, /v1/checkpoints/* - Now internal
 """
 import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.routes import router
+from app.api.routes import router as utility_router
+from app.api.evaluations import router as evaluation_router
 from app.api.live import router as live_router
+from app.api.criteria_routes import router as criteria_router
 from app.core.config import settings
 from app.core.logging import get_logger
 
@@ -18,12 +31,21 @@ os.makedirs(settings.temp_dir, exist_ok=True)
 
 
 def init_database():
-    """Initialize database tables."""
+    """Initialize database tables and seed data."""
     try:
-        from app.db.connection import init_db
+        from app.db.connection import init_db, get_db_session
+        from app.db.seeds import run_all_seeds
+        
         logger.info("Initializing database...")
         init_db()
-        logger.info("✓ Database initialized")
+        logger.info("✓ Database tables created")
+        
+        # Seed built-in data (presets, etc.)
+        logger.info("Seeding database...")
+        with get_db_session() as session:
+            run_all_seeds(session)
+        logger.info("✓ Database seeded")
+        
     except Exception as e:
         logger.error(f"Database initialization failed: {e}")
         logger.warning("Database features may not work correctly")
@@ -87,7 +109,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.app_name,
     version=settings.version,
-    description="Child safety video analysis service using YOLO26 and HF models",
+    description="Video evaluation framework with configurable criteria",
     lifespan=lifespan
 )
 
@@ -100,9 +122,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include routers
-app.include_router(router, prefix=settings.api_prefix)
-app.include_router(live_router, prefix=settings.api_prefix)
+# ===== New Evaluation-Centric API =====
+# Primary API - all new code should use these
+app.include_router(evaluation_router)  # /v1/evaluate, /v1/evaluations/*
+app.include_router(criteria_router)    # /v1/criteria/*
+app.include_router(live_router, prefix=settings.api_prefix)  # /v1/live/*
+
+# ===== Utility Routes =====
+# Health check and model info
+app.include_router(utility_router, prefix=settings.api_prefix)
 
 
 @app.get("/")

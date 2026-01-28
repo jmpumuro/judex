@@ -1,5 +1,5 @@
 """
-Finalize node - prepare final output.
+Finalize node - prepare final output using unified result format.
 """
 from app.pipeline.state import PipelineState
 from app.core.logging import get_logger
@@ -9,36 +9,28 @@ logger = get_logger("node.finalize")
 
 
 def finalize(state: PipelineState) -> PipelineState:
-    """Prepare final output JSON."""
+    """
+    Prepare final output JSON.
+    
+    Uses unified format from criteria_scores (set by generic_fuse_policy).
+    """
     logger.info("=== Finalize Node ===")
     
     send_progress(state.get("progress_callback"), "finalize", "Finalizing results", 98)
     
-    criterion_scores = state.get("criterion_scores", {})
+    # Get data from state (unified format from fusion)
+    criteria_scores = state.get("criteria_scores", {})
     violations = state.get("violations", [])
     verdict = state.get("verdict", "UNKNOWN")
+    confidence = state.get("confidence", 0.0)
     evidence = state.get("evidence", {})
     report = state.get("report", "")
-    
-    # Build criteria status
-    criteria = {}
-    for criterion, score in criterion_scores.items():
-        if score >= 0.6:
-            status = "violation"
-        elif score >= 0.3:
-            status = "caution"
-        else:
-            status = "ok"
-        
-        criteria[criterion] = {
-            "score": round(score, 2),
-            "status": status
-        }
     
     # Build final result
     result = {
         "verdict": verdict,
-        "criteria": criteria,
+        "confidence": round(confidence, 3),
+        "criteria": criteria_scores,  # Already in unified format
         "violations": violations,
         "evidence": evidence,
         "report": report,
@@ -65,10 +57,9 @@ def finalize(state: PipelineState) -> PipelineState:
     if state.get("labeled_video_path"):
         result["labeled_video_path"] = state["labeled_video_path"]
     
-    # Add timings if available and include in metadata
+    # Add timings
     if "timings" in state:
         result["timings"] = state["timings"]
-        # Also add total processing time to metadata for easy access
         result["metadata"]["processing_time"] = state["timings"].get("total_seconds", 0)
     
     state["result"] = result

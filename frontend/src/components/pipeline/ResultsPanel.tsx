@@ -1,12 +1,12 @@
 import { FC, useState } from 'react'
-import { VideoResult } from '@/types'
+import { EvaluationResult } from '@/types/api'
 import { formatDuration, formatPercent } from '@/utils/format'
 import VideoPlayer from './VideoPlayer'
 import Badge from '../common/Badge'
 import Button from '../common/Button'
 
 interface ResultsPanelProps {
-  result: VideoResult
+  result: EvaluationResult
   videoId: string
 }
 
@@ -19,6 +19,22 @@ const ResultsPanel: FC<ResultsPanelProps> = ({ result, videoId }) => {
     ? `${API_URL}/v1/videos/${videoId}/labeled`
     : `${API_URL}/v1/videos/${videoId}/uploaded`
 
+  // Extract scores from criteria_scores or violations
+  const scores: Record<string, number> = {}
+  if (result.criteria_scores) {
+    Object.entries(result.criteria_scores).forEach(([key, val]) => {
+      scores[key] = typeof val === 'object' ? val.score : val
+    })
+  } else if (result.violations) {
+    result.violations.forEach(v => {
+      scores[v.criterion] = v.score
+    })
+  }
+
+  // Extract evidence with fallbacks
+  const evidence = result.evidence || {}
+  const violenceSegments = (evidence as any)?.violence_segments || (evidence as any)?.violence || []
+
   return (
     <div className="space-y-4">
       {/* Verdict Summary */}
@@ -28,27 +44,33 @@ const ResultsPanel: FC<ResultsPanelProps> = ({ result, videoId }) => {
           <Badge variant={result.verdict}>{result.verdict}</Badge>
         </div>
         
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-          {Object.entries(result.scores).map(([key, value]) => (
-            <div key={key} className="text-center">
-              <p className="text-xs text-gray-400 uppercase mb-1">{key}</p>
-              <p className={`text-2xl font-bold ${
-                value > 0.75 ? 'text-danger' :
-                value > 0.40 ? 'text-warning' :
-                'text-success'
-              }`}>
-                {formatPercent(value)}
-              </p>
-            </div>
-          ))}
-        </div>
+        {Object.keys(scores).length > 0 && (
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+            {Object.entries(scores).map(([key, value]) => (
+              <div key={key} className="text-center">
+                <p className="text-xs text-gray-400 uppercase mb-1">{key}</p>
+                <p className={`text-2xl font-bold ${
+                  value > 0.75 ? 'text-danger' :
+                  value > 0.40 ? 'text-warning' :
+                  'text-success'
+                }`}>
+                  {formatPercent(value)}
+                </p>
+              </div>
+            ))}
+          </div>
+        )}
 
         <div className="mt-3 pt-3 border-t border-gray-800 text-sm text-gray-400">
-          <span>Processing Time: {result.processing_time_sec.toFixed(1)}s</span>
-          <span className="mx-2">•</span>
-          <span>Duration: {formatDuration(result.evidence.video_metadata.duration)}</span>
-          <span className="mx-2">•</span>
-          <span>Resolution: {result.evidence.video_metadata.width}×{result.evidence.video_metadata.height}</span>
+          {result.processing_time_sec && (
+            <span>Processing Time: {result.processing_time_sec.toFixed(1)}s</span>
+          )}
+          {(result as any).metadata?.duration && (
+            <>
+              <span className="mx-2">•</span>
+              <span>Duration: {formatDuration((result as any).metadata.duration)}</span>
+            </>
+          )}
         </div>
       </div>
 
@@ -76,7 +98,7 @@ const ResultsPanel: FC<ResultsPanelProps> = ({ result, videoId }) => {
 
         <VideoPlayer
           videoUrl={videoUrl}
-          violenceSegments={result.evidence.violence_segments}
+          violenceSegments={violenceSegments}
         />
       </div>
 
@@ -108,19 +130,22 @@ const ResultsPanel: FC<ResultsPanelProps> = ({ result, videoId }) => {
         <div className="p-4 max-h-96 overflow-y-auto">
           {activeTab === 'summary' ? (
             <div className="prose prose-invert prose-sm max-w-none">
-              <p className="text-gray-300 whitespace-pre-wrap">{result.summary}</p>
+              <p className="text-gray-300 whitespace-pre-wrap">
+                {result.report || (result as any).summary || 'No summary available'}
+              </p>
             </div>
           ) : (
             <div className="space-y-4">
               {/* Violence Segments */}
-              {result.evidence.violence_segments.length > 0 && (
+              {violenceSegments.length > 0 && (
                 <div>
                   <h4 className="font-semibold text-white mb-2">Violence Detected</h4>
                   <div className="space-y-2">
-                    {result.evidence.violence_segments.map((seg, idx) => (
+                    {violenceSegments.map((seg: any, idx: number) => (
                       <div key={idx} className="bg-dark-50 rounded p-2 text-sm">
                         <span className="text-gray-300">
-                          {formatDuration(seg.start_time)} - {formatDuration(seg.end_time)}
+                          {formatDuration(seg.start_time || seg.start || seg.segment * 3)} - 
+                          {formatDuration(seg.end_time || seg.end || (seg.segment + 1) * 3)}
                         </span>
                         <span className="ml-2 text-danger font-medium">
                           {formatPercent(seg.score)}
@@ -132,43 +157,56 @@ const ResultsPanel: FC<ResultsPanelProps> = ({ result, videoId }) => {
               )}
 
               {/* Object Detections */}
-              {result.evidence.object_detections.detections.length > 0 && (
+              {((evidence as any)?.object_detections?.length > 0 || (evidence as any)?.vision?.length > 0) && (
                 <div>
                   <h4 className="font-semibold text-white mb-2">Objects Detected</h4>
                   <p className="text-sm text-gray-400">
-                    {result.evidence.object_detections.total_frames_analyzed} frames analyzed
+                    {(evidence as any)?.object_detections?.length || (evidence as any)?.vision?.length || 0} detections
                   </p>
                 </div>
               )}
 
               {/* Audio Transcript */}
-              {result.evidence.audio_transcript.length > 0 && (
+              {((evidence as any)?.audio_transcript?.length > 0 || (evidence as any)?.transcript?.length > 0) && (
                 <div>
                   <h4 className="font-semibold text-white mb-2">Audio Transcript</h4>
                   <div className="space-y-2">
-                    {result.evidence.audio_transcript.slice(0, 5).map((item, idx) => (
-                      <div key={idx} className="bg-dark-50 rounded p-2 text-sm">
-                        <span className="text-gray-400">[{formatDuration(item.timestamp)}]</span>
-                        <span className="ml-2 text-gray-300">{item.text}</span>
-                      </div>
-                    ))}
+                    {((evidence as any)?.audio_transcript || (evidence as any)?.transcript || [])
+                      .slice(0, 5)
+                      .map((item: any, idx: number) => (
+                        <div key={idx} className="bg-dark-50 rounded p-2 text-sm">
+                          <span className="text-gray-400">
+                            [{formatDuration(item.timestamp || item.start || 0)}]
+                          </span>
+                          <span className="ml-2 text-gray-300">{item.text}</span>
+                        </div>
+                      ))}
                   </div>
                 </div>
               )}
 
               {/* OCR Results */}
-              {result.evidence.ocr_results.length > 0 && (
+              {((evidence as any)?.ocr_results?.length > 0 || (evidence as any)?.ocr?.length > 0) && (
                 <div>
                   <h4 className="font-semibold text-white mb-2">OCR Text Extracted</h4>
                   <div className="space-y-2">
-                    {result.evidence.ocr_results.slice(0, 5).map((item, idx) => (
-                      <div key={idx} className="bg-dark-50 rounded p-2 text-sm">
-                        <span className="text-gray-400">[{formatDuration(item.timestamp)}]</span>
-                        <span className="ml-2 text-gray-300">{item.text}</span>
-                      </div>
-                    ))}
+                    {((evidence as any)?.ocr_results || (evidence as any)?.ocr || [])
+                      .slice(0, 5)
+                      .map((item: any, idx: number) => (
+                        <div key={idx} className="bg-dark-50 rounded p-2 text-sm">
+                          <span className="text-gray-400">
+                            [{formatDuration(item.timestamp || 0)}]
+                          </span>
+                          <span className="ml-2 text-gray-300">{item.text}</span>
+                        </div>
+                      ))}
                   </div>
                 </div>
+              )}
+              
+              {/* No Evidence Available */}
+              {!result.evidence && violenceSegments.length === 0 && (
+                <p className="text-gray-500 text-sm">No detailed evidence available</p>
               )}
             </div>
           )}

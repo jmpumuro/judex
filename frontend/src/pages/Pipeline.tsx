@@ -2,12 +2,20 @@ import { FC, useState, useEffect, useRef, useCallback } from 'react'
 import { 
   Upload, Plus, Video, Play, Trash2,
   RotateCcw, Loader2, Link, Database, Cloud,
-  Check, Circle, AlertCircle, X, Eye
+  Check, Circle, AlertCircle, X, Eye, ChevronDown, Info
 } from 'lucide-react'
 import { useVideoStore, QueueVideo, VideoStatus } from '@/store/videoStore'
 import { useSettingsStore } from '@/store/settingsStore'
-import { evaluationApi, resultsApi, checkpointsApi, videoApi, stageApi, createSSEConnection } from '@/api/endpoints'
+import { evaluationApi, stageApi, createSSEConnection, api } from '@/api/endpoints'
+import { evaluations as evaluationsApi } from '@/api'
 import toast from 'react-hot-toast'
+
+interface CriteriaPreset {
+  id: string
+  name: string
+  description?: string
+  criteria_count: number
+}
 
 // Pipeline stage definitions
 // 'id' is used for UI tracking, 'backendId' is used for API calls
@@ -22,14 +30,13 @@ const PIPELINE_STAGES = [
   { id: 'text_moderation', backendId: 'text_moderation', name: 'Moderate', number: '08' },
   { id: 'policy_fusion', backendId: 'policy_fusion', name: 'Scoring', number: '09' },
   { id: 'report_generation', backendId: 'report', name: 'Report', number: '10' },
-  { id: 'finalize', backendId: 'finalize', name: 'Finalize', number: '11' },
 ]
 
 const STAGE_PROGRESS_MAP: Record<string, number> = {
   'ingest_video': 5, 'segment_video': 10, 'yolo26_vision': 25,
   'yoloworld_vision': 30, 'violence_detection': 40, 'audio_transcription': 55,
-  'ocr_extraction': 65, 'text_moderation': 75, 'policy_fusion': 85,
-  'report_generation': 95, 'finalize': 100
+  'ocr_extraction': 65, 'text_moderation': 75, 'policy_fusion': 90,
+  'report_generation': 100
 }
 
 // Generate stage content matching original index.html data structure
@@ -490,7 +497,8 @@ const generateStageContent = (stageName: string, data: any) => {
       )
     }
     
-    case 'finalize': {
+    case 'complete': {
+      // Final result view (no longer a separate pipeline stage)
       return (
         <div className="space-y-3">
           <div className={`p-4 border text-center ${
@@ -517,7 +525,7 @@ const Pipeline: FC = () => {
   const { 
     queue, selectedVideoId, processingBatch,
     addVideos, updateVideo, removeVideo, selectVideo, 
-    setProcessingBatch, loadSavedResults, getVideoById, getVideoByBatchId
+    setProcessingBatch, getVideoById, getVideoByItemId
   } = useVideoStore()
   
   const { currentPolicy } = useSettingsStore()
@@ -531,6 +539,10 @@ const Pipeline: FC = () => {
   const [stageLoading, setStageLoading] = useState(false)
   const [completedStages, setCompletedStages] = useState<string[]>([])
   const [videoError, setVideoError] = useState(false)
+  const [presets, setPresets] = useState<CriteriaPreset[]>([])
+  const [customCriteria, setCustomCriteria] = useState<CriteriaPreset[]>([])
+  const [selectedPreset, setSelectedPreset] = useState<string>('child_safety')
+  const [showPresetDropdown, setShowPresetDropdown] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const sseConnectionsRef = useRef<Map<string, EventSource>>(new Map())
 
@@ -571,24 +583,54 @@ const Pipeline: FC = () => {
     }
   }
 
-  // Load saved results and checkpoints on mount
+  // Load saved results, checkpoints, and criteria presets on mount
   useEffect(() => {
     const loadData = async () => {
       try {
-        const results = await resultsApi.load()
-        if (results.length > 0) loadSavedResults(results)
+        // Load criteria presets (built-in and custom)
+        const [presetsRes, customRes] = await Promise.all([
+          api.get('/criteria/presets').catch(() => ({ data: [] })),
+          api.get('/criteria/custom').catch(() => ({ data: [] }))
+        ])
+        setPresets(presetsRes.data || [])
+        setCustomCriteria(customRes.data || [])
+
+        // Load recent evaluations and add completed/processing ones to the queue
+        const { evaluations } = await evaluationApi.list(20)
         
-        const checkpoints = await checkpointsApi.list()
-        checkpoints.forEach((cp: any) => {
-          const exists = queue.find(v => v.id === cp.video_id || v.batchVideoId === cp.batch_video_id || v.filename === cp.filename)
-          if (!exists) {
-            addVideos([{
-              filename: cp.filename, file: null, status: 'failed', source: 'local',
-              progress: cp.progress || 0, currentStage: cp.stage, batchVideoId: cp.batch_video_id,
-              error: `Interrupted at ${cp.progress}% (${cp.stage})`,
-            }])
+        // Fetch full details for each evaluation to get items with results
+        for (const evalSummary of evaluations) {
+          if (evalSummary.status !== 'completed' && evalSummary.status !== 'processing') continue
+          
+          try {
+            const evaluation = await evaluationApi.get(evalSummary.id)
+            if (!evaluation.items?.length) continue
+            
+            evaluation.items.forEach((item: any) => {
+              // Skip if already in queue
+              const exists = queue.find(v => 
+                v.itemId === item.id || 
+                (v.evaluationId === evaluation.id && v.filename === item.filename)
+              )
+              if (exists) return
+              
+              addVideos([{
+                filename: item.filename,
+                file: null,
+                status: item.status || evaluation.status,
+                source: (item.source_type || 'upload') as 'local' | 'url' | 'storage',
+                progress: item.progress || (evaluation.status === 'completed' ? 100 : 0),
+                currentStage: item.current_stage || (evaluation.status === 'completed' ? 'report_generation' : undefined),
+                verdict: item.result?.verdict,
+                result: item.result,
+                evaluationId: evaluation.id,
+                itemId: item.id,
+              }])
+            })
+          } catch (e) {
+            console.warn(`Failed to load evaluation ${evalSummary.id}:`, e)
           }
-        })
+        }
       } catch (error) {
         console.error('Error loading data:', error)
       }
@@ -605,19 +647,28 @@ const Pipeline: FC = () => {
     }
   }, [queue, selectedVideoId, selectVideo])
 
-  // SSE connection with retry
-  const connectSSE = useCallback((videoId: string, queueVideoId: string, retryCount = 0) => {
+  // SSE connection with retry - evaluationId is used for SSE, queueVideoId is for fallback updates
+  const connectSSE = useCallback((evaluationId: string, queueVideoId: string, retryCount = 0) => {
     const maxRetries = 3
-    const existing = sseConnectionsRef.current.get(videoId)
+    const existing = sseConnectionsRef.current.get(evaluationId)
     if (existing) existing.close()
 
-    const eventSource = createSSEConnection(videoId)
-    sseConnectionsRef.current.set(videoId, eventSource)
+    const eventSource = createSSEConnection(evaluationId)
+    sseConnectionsRef.current.set(evaluationId, eventSource)
 
     eventSource.onmessage = (event) => {
       try {
         const update = JSON.parse(event.data)
-        const video = getVideoById(queueVideoId)
+        
+        // Find the video to update - SSE may include item_id for batch updates
+        let targetVideoId = queueVideoId
+        if (update.item_id) {
+          // Find queue video by itemId (which maps to item_id from SSE)
+          const found = queue.find(v => v.itemId === update.item_id)
+          if (found) targetVideoId = found.id
+        }
+        
+        const video = getVideoById(targetVideoId)
         if (!video) return
 
         let progress = 0
@@ -633,16 +684,17 @@ const Pipeline: FC = () => {
           }
         }
 
-        updateVideo(queueVideoId, {
+        updateVideo(targetVideoId, {
           currentStage: update.stage,
           progress: Math.min(progress, 100),
           statusMessage: update.message,
-          status: update.stage === 'complete' || (update.stage === 'finalize' && progress >= 100) ? 'completed' : 'processing'
+          status: update.stage === 'complete' || (update.stage === 'report' && progress >= 100) ? 'completed' : 'processing'
         })
 
-        if (update.stage === 'complete') {
+        // Close SSE when evaluation is complete (not just one item)
+        if (update.evaluation_complete || (update.stage === 'complete' && !update.item_id)) {
           eventSource.close()
-          sseConnectionsRef.current.delete(videoId)
+          sseConnectionsRef.current.delete(evaluationId)
         }
       } catch (e) {
         console.error('SSE parse error:', e)
@@ -651,13 +703,13 @@ const Pipeline: FC = () => {
 
     eventSource.onerror = () => {
       eventSource.close()
-      sseConnectionsRef.current.delete(videoId)
+      sseConnectionsRef.current.delete(evaluationId)
       const video = getVideoById(queueVideoId)
       if (video && video.status === 'processing' && retryCount < maxRetries) {
-        setTimeout(() => connectSSE(videoId, queueVideoId, retryCount + 1), 2000 * (retryCount + 1))
+        setTimeout(() => connectSSE(evaluationId, queueVideoId, retryCount + 1), 2000 * (retryCount + 1))
       }
     }
-  }, [getVideoById, updateVideo])
+  }, [getVideoById, updateVideo, queue])
 
   const handleFileSelect = async (files: FileList | null) => {
     if (!files || files.length === 0) return
@@ -689,12 +741,17 @@ const Pipeline: FC = () => {
     updateVideo(videoId, { status: 'processing', currentStage: 'ingest_video', progress: 0 })
 
     try {
-      const response = await evaluationApi.uploadBatch([video.file], currentPolicy)
-      if (response.videos?.[0]) {
-        const batchVideo = response.videos[0]
-        updateVideo(videoId, { batchVideoId: batchVideo.video_id })
-        connectSSE(batchVideo.video_id, videoId)
-        pollBatchStatus(response.batch_id)
+      const response = await evaluationApi.create({ 
+        files: [video.file], 
+        criteriaId: selectedPreset || undefined,
+        async: true 
+      })
+      if (response.items?.[0]) {
+        const item = response.items[0]
+        updateVideo(videoId, { itemId: item.id, evaluationId: response.id })
+        // SSE uses evaluation_id, not video_id
+        connectSSE(response.id, videoId)
+        pollEvaluationStatus(response.id)
       }
     } catch (error: any) {
       updateVideo(videoId, { status: 'failed', error: error.message })
@@ -709,45 +766,48 @@ const Pipeline: FC = () => {
 
     try {
       const files = videosToProcess.map(v => v.file!).filter(Boolean)
-      const response = await evaluationApi.uploadBatch(files, currentPolicy)
-      response.videos.forEach((batchVideo: any) => {
-        const queueVideo = queue.find(v => v.filename === batchVideo.filename)
+      const response = await evaluationApi.create({ 
+        files, 
+        criteriaId: selectedPreset || undefined,
+        async: true 
+      })
+      const evaluationId = response.id
+      response.items?.forEach((item: any) => {
+        const queueVideo = queue.find(v => v.filename === item.filename)
         if (queueVideo) {
-          updateVideo(queueVideo.id, { batchVideoId: batchVideo.video_id, status: 'processing' })
-          connectSSE(batchVideo.video_id, queueVideo.id)
+          updateVideo(queueVideo.id, { itemId: item.id, evaluationId, status: 'processing' })
         }
       })
-      pollBatchStatus(response.batch_id)
+      // SSE uses evaluation_id for all items
+      connectSSE(evaluationId, videosToProcess[0]?.id || '')
+      pollEvaluationStatus(evaluationId)
     } catch (error: any) {
       toast.error('Failed to start batch processing'); setProcessingBatch(false)
     }
   }
 
-  const pollBatchStatus = (batchId: string) => {
+  const pollEvaluationStatus = (evaluationId: string) => {
     const interval = setInterval(async () => {
       try {
-        const data = await evaluationApi.getBatchStatus(batchId)
-        if (data.videos) {
-          Object.values(data.videos).forEach((bv: any) => {
-            const qv = getVideoByBatchId(bv.video_id) || queue.find(v => v.filename === bv.filename)
+        const data = await evaluationApi.get(evaluationId)
+        if (data.items) {
+          data.items.forEach((item: any) => {
+            const qv = getVideoByItemId(item.id) || queue.find(v => v.filename === item.filename)
             if (qv) {
               updateVideo(qv.id, {
-                status: bv.status, progress: bv.progress || 0, verdict: bv.verdict,
-                error: bv.error, result: bv.result,
-                duration: bv.result?.metadata?.duration ? `${bv.result.metadata.duration.toFixed(1)}s` : undefined
+                status: item.status as VideoStatus, 
+                progress: item.progress || 0, 
+                verdict: item.result?.verdict,
+                error: item.error_message || undefined, 
+                result: item.result,
+                duration: item.result?.processing_time ? `${item.result.processing_time.toFixed(1)}s` : undefined
               })
             }
           })
         }
         if (data.status === 'completed') {
           clearInterval(interval); setProcessingBatch(false)
-          const completed = queue.filter(v => v.status === 'completed' && v.result)
-          if (completed.length > 0) {
-            await resultsApi.save(completed.map(v => ({
-              id: v.id, filename: v.filename, status: v.status, verdict: v.verdict,
-              duration: v.duration, result: v.result, batchVideoId: v.batchVideoId, timestamp: new Date().toISOString()
-            })))
-          }
+          // Results are now saved automatically by the backend
         }
       } catch { clearInterval(interval); setProcessingBatch(false) }
     }, 2000)
@@ -756,9 +816,12 @@ const Pipeline: FC = () => {
   const retryVideo = async (videoId: string) => {
     const video = getVideoById(videoId)
     if (!video) return
-    if (!video.file && video.batchVideoId) {
+    if (!video.file && video.evaluationId && video.itemId) {
       try {
-        const blob = await videoApi.getUploadedVideo(video.batchVideoId)
+        // Fetch original video from evaluation artifacts
+        const url = evaluationsApi.getUploadedVideoUrl(video.evaluationId, video.itemId)
+        const response = await fetch(url)
+        const blob = await response.blob()
         const file = new File([blob], video.filename, { type: 'video/mp4' })
         updateVideo(videoId, { file, status: 'queued', error: undefined })
       } catch { toast.error('Cannot retry: original file not available'); return }
@@ -772,19 +835,13 @@ const Pipeline: FC = () => {
     // Remove from local store first
     removeVideo(videoId)
     
-    // Delete from backend if it was saved
-    const backendId = video.batchVideoId || videoId
-    try {
-      // Delete result (also deletes from database)
-      await resultsApi.delete(backendId)
-    } catch (e) {
-      // Ignore if not found
-    }
-    try {
-      // Delete checkpoint
-      await checkpointsApi.delete(backendId)
-    } catch (e) {
-      // Ignore if not found
+    // Delete from backend if it has an evaluation ID
+    if (video.evaluationId) {
+      try {
+        await evaluationsApi.delete(video.evaluationId)
+      } catch (e) {
+        // Ignore if not found - might be local-only
+      }
     }
     toast.success('Video deleted')
   }
@@ -793,18 +850,19 @@ const Pipeline: FC = () => {
   const handleClearAll = async () => {
     if (!confirm('Delete all videos from queue and saved results?')) return
     
-    // Get all video IDs before clearing
-    const videoIds = queue.map(v => v.id)
+    // Get all evaluation IDs before clearing
+    const evaluationIds = new Set(queue.filter(v => v.evaluationId).map(v => v.evaluationId!))
     
     // Clear local store
-    videoIds.forEach(id => removeVideo(id))
+    queue.forEach(v => removeVideo(v.id))
     
-    // Delete all from backend
-    try {
-      await resultsApi.clearAll().catch(() => {})
-      await checkpointsApi.clearAll().catch(() => {})
-    } catch (e) {
-      // Continue even if backend fails
+    // Delete all evaluations from backend
+    for (const evalId of evaluationIds) {
+      try {
+        await evaluationsApi.delete(evalId)
+      } catch (e) {
+        // Continue even if some fail
+      }
     }
     
     toast.success('All videos cleared')
@@ -824,11 +882,14 @@ const Pipeline: FC = () => {
   }
 
   // Fetch stage output from backend with localStorage caching
-  const fetchStageOutput = async (videoId: string, stageName: string) => {
+  const fetchStageOutput = async (evaluationId: string, stageName: string, itemId?: string) => {
     setStageLoading(true)
     
+    // Use itemId for caching if available, otherwise evaluationId
+    const cacheKey = itemId || evaluationId
+    
     // Check localStorage cache first
-    const cached = getCachedStageOutput(videoId, stageName)
+    const cached = getCachedStageOutput(cacheKey, stageName)
     if (cached) {
       console.log('Using cached stage output for:', stageName)
       setStageOutput(cached)
@@ -837,16 +898,17 @@ const Pipeline: FC = () => {
     }
     
     try {
-      const output = await stageApi.getStageOutput(videoId, stageName)
+      // Use new evaluation API with evaluationId and itemId
+      const output = await stageApi.getStageOutput(evaluationId, stageName, itemId)
       if (output && Object.keys(output).length > 0) {
         // Cache the result
-        setCachedStageOutput(videoId, stageName, output)
+        setCachedStageOutput(cacheKey, stageName, output)
         setStageOutput(output)
         setStageLoading(false)
         return
       }
     } catch (error) {
-      console.log('Stage output not in checkpoint, using fallback:', stageName)
+      console.log('Stage output fetch failed, using fallback:', stageName)
     }
     
     // Fallback: derive stage data from video result
@@ -854,7 +916,7 @@ const Pipeline: FC = () => {
       console.log('Deriving stage output from result for:', stageName)
       const derivedOutput = deriveStageOutputFromResult(stageName, selectedVideo.result)
       // Cache the derived output too
-      setCachedStageOutput(videoId, stageName, derivedOutput)
+      setCachedStageOutput(cacheKey, stageName, derivedOutput)
       setStageOutput(derivedOutput)
     } else {
       console.log('No result data available for fallback')
@@ -863,10 +925,34 @@ const Pipeline: FC = () => {
     setStageLoading(false)
   }
   
+  // Helper to safely convert evidence to array
+  const toArray = (data: any): any[] => {
+    if (!data) return []
+    if (Array.isArray(data)) return data
+    if (typeof data === 'object') {
+      // Handle objects with items/texts/results arrays
+      if (Array.isArray(data.items)) return data.items
+      if (Array.isArray(data.texts)) return data.texts
+      if (Array.isArray(data.results)) return data.results
+      if (Array.isArray(data.detections)) return data.detections
+      // Single object - wrap in array
+      return [data]
+    }
+    return []
+  }
+  
   // Derive stage-specific output from overall result (for older videos without checkpoint data)
   const deriveStageOutputFromResult = (stageName: string, result: any) => {
     const evidence = result.evidence || {}
     const metadata = result.metadata || {}
+    
+    // Safely get arrays from evidence
+    const visionData = toArray(evidence.vision)
+    const yoloworldData = toArray(evidence.yoloworld)
+    const violenceData = toArray(evidence.violence_segments || evidence.violence)
+    const ocrData = toArray(evidence.ocr)
+    const transcriptMod = toArray(evidence.transcript_moderation)
+    const ocrMod = toArray(evidence.ocr_moderation)
     
     switch (stageName) {
       case 'ingest':
@@ -887,61 +973,62 @@ const Pipeline: FC = () => {
       case 'yolo26':
         return {
           stage: 'yolo26',
-          detections: evidence.vision || [],
-          total_detections: (evidence.vision || []).length
+          detections: visionData,
+          total_detections: visionData.length
         }
       case 'yoloworld':
         return {
           stage: 'yoloworld',
-          detections: evidence.yoloworld || [],
-          total_detections: (evidence.yoloworld || []).length
+          detections: yoloworldData,
+          total_detections: yoloworldData.length
         }
       case 'violence':
         return {
           stage: 'violence',
-          violence_segments: evidence.violence_segments || []
+          violence_segments: violenceData
         }
       case 'audio_asr':
         return {
           stage: 'audio_asr',
-          full_text: result.transcript?.text || '',
-          chunks: result.transcript?.chunks || []
+          full_text: result.transcript?.text || evidence.transcription?.text || '',
+          chunks: toArray(result.transcript?.chunks || evidence.transcription?.chunks)
         }
       case 'ocr':
         return {
           stage: 'ocr',
-          texts: (evidence.ocr || []).map((o: any) => o.text),
-          total_detections: (evidence.ocr || []).length
+          texts: ocrData.map((o: any) => typeof o === 'string' ? o : (o.text || o.content || '')),
+          total_detections: ocrData.length
         }
       case 'text_moderation':
         return {
           stage: 'text_moderation',
-          transcript_chunks_analyzed: result.transcript?.chunks?.length || 0,
-          ocr_items_analyzed: (evidence.ocr || []).length,
-          flagged_transcript: evidence.transcript_moderation || [],
-          flagged_ocr: evidence.ocr_moderation || []
+          transcript_chunks_analyzed: toArray(result.transcript?.chunks).length,
+          ocr_items_analyzed: ocrData.length,
+          flagged_transcript: transcriptMod,
+          flagged_ocr: ocrMod
         }
       case 'policy_fusion':
         return {
           stage: 'policy_fusion',
           verdict: result.verdict,
           scores: Object.fromEntries(
-            Object.entries(result.criteria || {}).map(([k, v]: [string, any]) => [k, v?.value || v || 0])
+            Object.entries(result.criteria || {}).map(([k, v]: [string, any]) => [k, v?.score || v?.value || v || 0])
           ),
-          violations: result.violations || []
+          violations: toArray(result.violations)
         }
       case 'report':
         return {
           stage: 'report',
-          report_preview: result.report,
+          report_preview: result.report || result.summary,
           report_type: 'saved'
         }
+      // 'finalize' stage removed - results shown in report stage or results panel
       default:
         return result
     }
   }
 
-  // Handle stage click - always fetch stage output from backend by video_id
+  // Handle stage click - fetch stage output using evaluation API
   const handleStageClick = async (stageId: string) => {
     if (selectedStage === stageId) {
       setSelectedStage(null)
@@ -951,14 +1038,15 @@ const Pipeline: FC = () => {
     
     setSelectedStage(stageId)
     
-    // Always fetch stage-specific output from backend using video_id
-    const videoId = selectedVideo?.batchVideoId || selectedVideo?.id
+    // Use evaluationId for API call, itemId for specific item within batch
+    const evaluationId = selectedVideo?.evaluationId
+    const itemId = selectedVideo?.itemId
     const stage = PIPELINE_STAGES.find(s => s.id === stageId)
     
-    if (videoId && stage) {
-      await fetchStageOutput(videoId, stage.backendId)
+    if (evaluationId && stage) {
+      await fetchStageOutput(evaluationId, stage.backendId, itemId)
     } else if (selectedVideo?.result) {
-      // Fallback to result data if no video_id available
+      // Fallback to result data if no evaluationId available
       setStageOutput(selectedVideo.result)
     }
   }
@@ -981,7 +1069,70 @@ const Pipeline: FC = () => {
     <div className="h-full flex flex-col bg-black text-white overflow-hidden">
       {/* Header */}
       <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between flex-shrink-0">
-        <span className="text-xs text-gray-500 tracking-widest">VIDEO QUEUE</span>
+        <div className="flex items-center gap-4">
+          <span className="text-xs text-gray-500 tracking-widest">VIDEO EVALUATOR</span>
+          {/* Criteria Selector */}
+          <div className="relative">
+            <button 
+              onClick={() => setShowPresetDropdown(!showPresetDropdown)}
+              className="flex items-center gap-2 px-3 py-1.5 text-xs border border-gray-700 hover:border-white transition-all"
+            >
+              <span className="text-gray-400">Criteria:</span>
+              <span className="text-white font-medium">
+                {[...presets, ...customCriteria].find(p => p.id === selectedPreset)?.name || selectedPreset}
+              </span>
+              <ChevronDown size={12} className={`transition-transform ${showPresetDropdown ? 'rotate-180' : ''}`} />
+            </button>
+            {showPresetDropdown && (
+              <div className="absolute top-full left-0 mt-1 bg-gray-900 border border-gray-700 shadow-xl z-50 min-w-[220px] max-h-80 overflow-y-auto">
+                {presets.length > 0 && (
+                  <>
+                    <div className="px-3 py-1.5 text-[9px] text-gray-500 uppercase tracking-wider border-b border-gray-800">
+                      Built-in Presets
+                    </div>
+                    {presets.map(preset => (
+                      <button
+                        key={preset.id}
+                        onClick={() => { setSelectedPreset(preset.id); setShowPresetDropdown(false) }}
+                        className={`w-full px-3 py-2 text-left text-xs hover:bg-gray-800 flex items-center justify-between ${
+                          selectedPreset === preset.id ? 'bg-gray-800 text-white' : 'text-gray-400'
+                        }`}
+                      >
+                        <div>
+                          <div className="font-medium">{preset.name}</div>
+                          <div className="text-[10px] text-gray-600">{preset.criteria_count} criteria</div>
+                        </div>
+                        {selectedPreset === preset.id && <Check size={12} className="text-green-400" />}
+                      </button>
+                    ))}
+                  </>
+                )}
+                {customCriteria.length > 0 && (
+                  <>
+                    <div className="px-3 py-1.5 text-[9px] text-gray-500 uppercase tracking-wider border-b border-gray-800 mt-1">
+                      Custom Criteria
+                    </div>
+                    {customCriteria.map(c => (
+                      <button
+                        key={c.id}
+                        onClick={() => { setSelectedPreset(c.id); setShowPresetDropdown(false) }}
+                        className={`w-full px-3 py-2 text-left text-xs hover:bg-gray-800 flex items-center justify-between ${
+                          selectedPreset === c.id ? 'bg-gray-800 text-white' : 'text-gray-400'
+                        }`}
+                      >
+                        <div>
+                          <div className="font-medium">{c.name}</div>
+                          <div className="text-[10px] text-gray-600">{c.criteria_count} criteria</div>
+                        </div>
+                        {selectedPreset === c.id && <Check size={12} className="text-green-400" />}
+                      </button>
+                    ))}
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
         <div className="flex items-center gap-2">
           <button onClick={() => setShowUploadModal(true)} className="p-1.5 border border-gray-700 hover:border-white transition-all" title="Add Video"><Plus size={16} /></button>
           {queue.length > 0 && (
@@ -990,7 +1141,7 @@ const Pipeline: FC = () => {
             </button>
           )}
           <button onClick={processAllVideos} disabled={processingBatch || queue.filter(v => v.status === 'queued' && v.file).length === 0} className="btn text-xs flex items-center gap-1.5 py-1.5 px-3">
-            {processingBatch ? <><Loader2 size={12} className="animate-spin" /> PROCESSING</> : <><Play size={12} /> PROCESS</>}
+            {processingBatch ? <><Loader2 size={12} className="animate-spin" /> PROCESSING</> : <><Play size={12} /> EVALUATE</>}
           </button>
         </div>
       </div>
@@ -1075,33 +1226,52 @@ const Pipeline: FC = () => {
                           )}
                         </div>
                       ) : (
-                        <video 
-                          controls 
-                          className="max-w-full max-h-full" 
-                          key={`${selectedVideo.id}-${videoType}`}
-                          src={(() => {
-                            const vid = selectedVideo.batchVideoId || (selectedVideo.result as any)?.metadata?.video_id
-                            
+                        (() => {
+                          // Use evaluation-based video URLs
+                          const evaluationId = selectedVideo.evaluationId
+                          const itemId = selectedVideo.itemId
+                          const getVideoSrc = () => {
                             if (videoType === 'original') {
-                              // Try local file first, then backend
+                              // For original video: local file first, then backend
                               if (selectedVideo.file) return URL.createObjectURL(selectedVideo.file)
-                              return vid ? videoApi.getUploadedVideoUrl(vid) : ''
+                              return evaluationId && itemId 
+                                ? evaluationsApi.getUploadedVideoUrl(evaluationId, itemId) 
+                                : null
                             } else {
-                              // Labeled video from backend
-                              return vid ? videoApi.getLabeledVideoUrl(vid) : ''
+                              // For labeled video: always from backend
+                              return evaluationId && itemId 
+                                ? evaluationsApi.getLabeledVideoUrl(evaluationId, itemId) 
+                                : null
                             }
-                          })()}
-                          onError={() => {
-                            if (videoType === 'labeled') {
-                              // If labeled fails, auto-switch to original
-                              console.log('Labeled video failed, trying original')
-                              setVideoType('original')
-                            } else {
-                              // Original also failed
-                              setVideoError(true)
-                            }
-                          }}
-                        />
+                          }
+                          const videoSrc = getVideoSrc()
+                          
+                          if (!videoSrc) {
+                            return (
+                              <div className="text-center text-gray-600 p-4">
+                                <Video size={24} className="mx-auto mb-2 opacity-50" />
+                                <p className="text-xs">Video not available</p>
+                              </div>
+                            )
+                          }
+                          
+                          return (
+                            <video 
+                              controls 
+                              className="max-w-full max-h-full" 
+                              key={`${selectedVideo.id}-${videoType}`}
+                              src={videoSrc}
+                              onError={() => {
+                                if (videoType === 'labeled') {
+                                  console.log('Labeled video failed, trying original')
+                                  setVideoType('original')
+                                } else {
+                                  setVideoError(true)
+                                }
+                              }}
+                            />
+                          )
+                        })()
                       )
                     ) : selectedVideo.status === 'processing' ? (
                       <div className="text-center"><Loader2 size={24} className="mx-auto mb-1 animate-spin text-gray-700" /><p className="text-[10px] text-gray-600">{selectedVideo.progress}%</p></div>
@@ -1125,24 +1295,72 @@ const Pipeline: FC = () => {
                       generateStageContent(selectedStage, stageOutput)
                     ) : selectedVideo.status === 'completed' && selectedVideo.result ? (
                       <div className="space-y-2">
+                        {/* Verdict */}
                         <div className={`p-3 border text-center ${
                           selectedVideo.verdict === 'SAFE' ? 'border-green-700 bg-green-900/20' :
                           selectedVideo.verdict === 'CAUTION' ? 'border-yellow-700 bg-yellow-900/20' :
                           selectedVideo.verdict === 'UNSAFE' ? 'border-red-700 bg-red-900/20' : 'border-blue-700 bg-blue-900/20'
                         }`}>
                           <div className="text-xl font-bold">{selectedVideo.verdict}</div>
-                          <div className="text-[10px] text-gray-500">{((selectedVideo.result.confidence || 0) * 100).toFixed(0)}% confidence</div>
+                          <div className="text-[10px] text-gray-500">
+                            {((selectedVideo.result.confidence || 0) * 100).toFixed(0)}% confidence
+                            {(selectedVideo.result as any).spec_id && <span className="ml-2">• {(selectedVideo.result as any).spec_id}</span>}
+                          </div>
                         </div>
-                        {selectedVideo.result.criteria && (
+                        
+                        {/* Dynamic Criteria / Violations */}
+                        {(selectedVideo.result.criteria_scores || (selectedVideo.result as any).criteria || selectedVideo.result.violations) && (
                           <div className="grid grid-cols-2 gap-1">
-                            {Object.entries(selectedVideo.result.criteria).slice(0, 6).map(([key, val]: [string, any]) => (
-                              <div key={key} className="bg-black p-2 border border-gray-800">
-                                <div className="text-[9px] text-gray-600 uppercase">{key}</div>
-                                <div className="text-sm font-medium">{typeof val === 'object' ? ((val.score || val.value || 0) * 100).toFixed(0) : ((parseFloat(val) || 0) * 100).toFixed(0)}%</div>
-                              </div>
-                            ))}
+                            {/* Use criteria_scores first, fall back to criteria or violations */}
+                            {(() => {
+                              const criteriaData = selectedVideo.result.criteria_scores || 
+                                                   (selectedVideo.result as any).criteria ||
+                                                   selectedVideo.result.violations?.reduce((acc: any, v: any) => {
+                                                     acc[v.criterion] = { score: v.score, status: v.severity }
+                                                     return acc
+                                                   }, {})
+                              if (!criteriaData) return null
+                              return Object.entries(criteriaData).map(([key, val]: [string, any]) => {
+                                const score = typeof val === 'object' ? (val.score || val.value || 0) : (parseFloat(val) || 0)
+                                const status = typeof val === 'object' ? (val.status || val.verdict) : undefined
+                                const borderColor = status === 'violation' || status === 'critical' ? 'border-red-600' :
+                                                    status === 'caution' || status === 'high' ? 'border-yellow-600' :
+                                                    score > 0.6 ? 'border-red-600' :
+                                                    score > 0.3 ? 'border-yellow-600' : 'border-gray-800'
+                                return (
+                                  <div key={key} className={`bg-black p-2 border ${borderColor}`}>
+                                    <div className="text-[9px] text-gray-600 uppercase truncate" title={key}>{key}</div>
+                                    <div className={`text-sm font-medium ${
+                                      status === 'violation' || status === 'critical' || score > 0.6 ? 'text-red-400' :
+                                      status === 'caution' || status === 'high' || score > 0.3 ? 'text-yellow-400' : ''
+                                    }`}>
+                                      {(score * 100).toFixed(0)}%
+                                    </div>
+                                  </div>
+                                )
+                              })
+                            })()}
                           </div>
                         )}
+                        
+                        {/* Explanation */}
+                        {(selectedVideo.result as any).explanation && (
+                          <div className="bg-gray-900 p-2 border-l-2 border-blue-500">
+                            <div className="flex items-center gap-1 mb-1">
+                              <Info size={10} className="text-blue-400" />
+                              <span className="text-[9px] text-blue-400">Explanation</span>
+                            </div>
+                            <p className="text-[10px] text-gray-400">{(selectedVideo.result as any).explanation?.summary || (selectedVideo.result as any).explanation}</p>
+                          </div>
+                        )}
+                        
+                        {/* Detectors Used */}
+                        {(selectedVideo.result as any).metadata?.detectors_run && (
+                          <div className="text-[9px] text-gray-600">
+                            Detectors: {(selectedVideo.result as any).metadata.detectors_run.join(', ')}
+                          </div>
+                        )}
+                        
                         <p className="text-[9px] text-gray-600 text-center">Click any completed stage above to see its output</p>
                       </div>
                     ) : selectedVideo.status === 'processing' ? (

@@ -1,40 +1,267 @@
+/**
+ * API Client - Clean interface to backend API.
+ * 
+ * Uses the new evaluation-centric API:
+ * - POST /v1/evaluate - Submit evaluation
+ * - GET /v1/evaluations/{id} - Get status/results
+ * - GET /v1/evaluations/{id}/events - SSE progress
+ * - GET /v1/evaluations/{id}/artifacts/{type} - Get artifacts
+ * - GET /v1/criteria/* - Criteria management
+ */
 import axios from 'axios'
-import toast from 'react-hot-toast'
+import type {
+  Evaluation,
+  EvaluationSummary,
+  EvaluationListResponse,
+  EvaluationItem,
+  CriteriaSummary,
+  CriteriaDetail,
+  Artifact,
+  StageOutput,
+  Health,
+} from '@/types/api'
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8012'
+// API base URL - in dev this goes through Vite proxy, in prod it's the same origin
+export const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8012'
 
-export const apiClient = axios.create({
-  baseURL: `${API_URL}/v1`,
+// Axios instance with default config
+export const api = axios.create({
+  baseURL: `${API_BASE}/v1`,
   headers: {
     'Content-Type': 'application/json',
   },
-  timeout: 120000, // 2 minutes for long-running operations
 })
 
-// Request interceptor
-apiClient.interceptors.request.use(
-  (config) => {
-    // Add any auth tokens here if needed
-    return config
-  },
-  (error) => {
-    return Promise.reject(error)
-  }
-)
-
-// Response interceptor
-apiClient.interceptors.response.use(
+// Error handling interceptor
+api.interceptors.response.use(
   (response) => response,
   (error) => {
-    const message = error.response?.data?.detail || error.message || 'An error occurred'
-    
-    // Don't show toast for expected errors (like 404 for checkpoints)
-    if (error.response?.status !== 404) {
-      toast.error(message)
-    }
-    
+    const message = error.response?.data?.detail || error.message || 'API Error'
+    console.error('API Error:', message)
     return Promise.reject(error)
   }
 )
 
-export default apiClient
+// ============================================================================
+// Evaluation API
+// ============================================================================
+
+export const evaluations = {
+  /**
+   * Submit a new evaluation.
+   * Returns evaluation ID for tracking.
+   */
+  create: async (params: {
+    files?: File[]
+    urls?: string[]
+    criteriaId?: string
+    criteriaYaml?: string
+    criteriaJson?: string
+    isAsync?: boolean
+  }): Promise<Evaluation> => {
+    const formData = new FormData()
+    
+    if (params.files) {
+      params.files.forEach(file => formData.append('files', file))
+    }
+    if (params.urls) {
+      formData.append('urls', params.urls.join(','))
+    }
+    if (params.criteriaId) {
+      formData.append('criteria_id', params.criteriaId)
+    }
+    if (params.criteriaYaml) {
+      formData.append('criteria', params.criteriaYaml)
+    }
+    if (params.criteriaJson) {
+      formData.append('criteria', params.criteriaJson)
+    }
+    formData.append('async', String(params.isAsync ?? true))
+    
+    const { data } = await api.post<Evaluation>('/evaluate', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+    return data
+  },
+  
+  /**
+   * Get evaluation by ID.
+   */
+  get: async (id: string, includeItems = true): Promise<Evaluation> => {
+    const { data } = await api.get<Evaluation>(`/evaluations/${id}`, {
+      params: { include_items: includeItems }
+    })
+    return data
+  },
+  
+  /**
+   * List recent evaluations.
+   */
+  list: async (limit = 50, status?: string): Promise<EvaluationListResponse> => {
+    const { data } = await api.get<EvaluationListResponse>('/evaluations', {
+      params: { limit, status }
+    })
+    return data
+  },
+  
+  /**
+   * Delete an evaluation.
+   */
+  delete: async (id: string): Promise<void> => {
+    await api.delete(`/evaluations/${id}`)
+  },
+  
+  /**
+   * Create SSE connection for progress updates.
+   */
+  createEventSource: (id: string): EventSource => {
+    return new EventSource(`${API_BASE}/v1/evaluations/${id}/events`)
+  },
+  
+  /**
+   * Get stage outputs for debugging.
+   */
+  getStages: async (id: string): Promise<StageOutput[]> => {
+    const { data } = await api.get<{ stages: StageOutput[] }>(`/evaluations/${id}/stages`)
+    return data.stages || []
+  },
+  
+  /**
+   * Get specific stage output.
+   */
+  getStageOutput: async (id: string, stageName: string): Promise<StageOutput | null> => {
+    const { data } = await api.get<StageOutput>(`/evaluations/${id}/stages/${stageName}`)
+    return data
+  },
+  
+  /**
+   * Get artifact URL (labeled video, thumbnail, etc.)
+   */
+  getArtifact: async (id: string, type: string, itemId?: string): Promise<Artifact> => {
+    const { data } = await api.get<Artifact>(`/evaluations/${id}/artifacts/${type}`, {
+      params: itemId ? { item_id: itemId } : undefined
+    })
+    return data
+  },
+  
+  /**
+   * Get direct URL for labeled video.
+   */
+  getLabeledVideoUrl: (evaluationId: string, itemId: string): string => {
+    return `${API_BASE}/v1/evaluations/${evaluationId}/artifacts/labeled_video?item_id=${itemId}`
+  },
+  
+  /**
+   * Get direct URL for uploaded video.
+   */
+  getUploadedVideoUrl: (evaluationId: string, itemId: string): string => {
+    return `${API_BASE}/v1/evaluations/${evaluationId}/artifacts/uploaded_video?item_id=${itemId}`
+  },
+}
+
+// ============================================================================
+// Criteria API
+// ============================================================================
+
+export const criteria = {
+  /**
+   * List available presets.
+   */
+  listPresets: async (): Promise<CriteriaSummary[]> => {
+    const { data } = await api.get<CriteriaSummary[]>('/criteria/presets')
+    return data
+  },
+  
+  /**
+   * Get preset details.
+   */
+  getPreset: async (id: string): Promise<CriteriaDetail> => {
+    const { data } = await api.get<CriteriaDetail>(`/criteria/presets/${id}`)
+    return data
+  },
+  
+  /**
+   * Export preset as YAML/JSON.
+   */
+  exportPreset: async (id: string, format: 'yaml' | 'json' = 'yaml'): Promise<string> => {
+    const { data } = await api.get<{ content: string }>(`/criteria/presets/${id}/export`, {
+      params: { format }
+    })
+    return data.content
+  },
+  
+  /**
+   * List custom (user-saved) criteria.
+   */
+  listCustom: async (): Promise<CriteriaSummary[]> => {
+    const { data } = await api.get<CriteriaSummary[]>('/criteria/custom')
+    return data
+  },
+  
+  /**
+   * Get custom criteria by ID.
+   */
+  getCustom: async (id: string): Promise<CriteriaDetail> => {
+    const { data } = await api.get<CriteriaDetail>(`/criteria/custom/${id}`)
+    return data
+  },
+  
+  /**
+   * Save custom criteria.
+   */
+  saveCustom: async (name: string, content: string, format: 'yaml' | 'json' = 'yaml'): Promise<CriteriaSummary> => {
+    const formData = new FormData()
+    formData.append('name', name)
+    formData.append('content', content)
+    formData.append('format', format)
+    
+    const { data } = await api.post<CriteriaSummary>('/criteria', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+    return data
+  },
+  
+  /**
+   * Delete custom criteria.
+   */
+  deleteCustom: async (id: string): Promise<void> => {
+    await api.delete(`/criteria/custom/${id}`)
+  },
+  
+  /**
+   * Validate criteria configuration.
+   */
+  validate: async (content: string, format: 'yaml' | 'json' = 'yaml'): Promise<{ valid: boolean; errors: string[] }> => {
+    const formData = new FormData()
+    formData.append('content', content)
+    formData.append('format', format)
+    
+    const { data } = await api.post<{ valid: boolean; errors: string[] }>('/criteria/validate', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+    return data
+  },
+}
+
+// ============================================================================
+// Health API
+// ============================================================================
+
+export const health = {
+  check: async (): Promise<Health> => {
+    const { data } = await api.get<Health>('/health')
+    return data
+  },
+}
+
+// ============================================================================
+// Default export - full API client
+// ============================================================================
+
+export default {
+  evaluations,
+  criteria,
+  health,
+  // Raw axios instance for custom requests
+  raw: api,
+}

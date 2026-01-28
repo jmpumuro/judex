@@ -12,6 +12,9 @@ class PipelineState(TypedDict, total=False):
     video_path: str
     policy_config: Dict[str, Any]
     
+    # Generic evaluation criteria (user-defined)
+    evaluation_criteria: Any  # EvaluationCriteria object
+    
     # Progress tracking
     progress_callback: Optional[Callable[[str, str, int], None]]
     current_stage: str
@@ -38,7 +41,8 @@ class PipelineState(TypedDict, total=False):
     sampled_frames: List[Dict[str, Any]]  # {path, timestamp, frame_index}
     
     # Model outputs
-    vision_detections: List[Dict[str, Any]]
+    vision_detections: List[Dict[str, Any]]  # YOLO26 detections
+    yoloworld_detections: List[Dict[str, Any]]  # YOLO-World detections
     violence_segments: List[Dict[str, Any]]
     transcript: Dict[str, Any]  # {full_text, chunks}
     ocr_results: List[Dict[str, Any]]
@@ -47,10 +51,12 @@ class PipelineState(TypedDict, total=False):
     transcript_moderation: List[Dict[str, Any]]
     ocr_moderation: List[Dict[str, Any]]
     
-    # Policy outputs
-    criterion_scores: Dict[str, float]
+    # Policy outputs (generic fusion)
+    criteria_scores: Dict[str, Any]  # Unified format from fusion
+    criterion_scores: Dict[str, float]  # Legacy - deprecated
     violations: List[Dict[str, Any]]
     verdict: str
+    confidence: float
     
     # Evidence
     evidence: Dict[str, Any]

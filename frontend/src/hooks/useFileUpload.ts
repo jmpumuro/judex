@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react'
 import { useVideoStore } from '@/store/videoStore'
-import { videoApi } from '@/api/endpoints/videos'
+import { evaluationApi } from '@/api/endpoints'
 import toast from 'react-hot-toast'
 
 export const useFileUpload = () => {
@@ -29,8 +29,8 @@ export const useFileUpload = () => {
       // Add to queue immediately
       addVideos(queueVideos)
 
-      // Upload to backend
-      const response = await videoApi.uploadBatch(files)
+      // Upload to backend using evaluation API
+      const response = await evaluationApi.create({ files, async: true })
       
       toast.success(`${files.length} video(s) uploaded successfully!`, { id: toastId })
       return response

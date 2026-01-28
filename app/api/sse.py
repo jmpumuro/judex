@@ -15,55 +15,47 @@ class SSEManager:
     """Manage SSE connections for progress updates."""
     
     def __init__(self):
-        # Map video_id -> set of queues (one queue per connected client)
+        # Map evaluation_id -> set of queues (one queue per connected client)
         self.connections: Dict[str, Set[Queue]] = {}
-        # Store video metadata for checkpoint saving
-        self.video_metadata: Dict[str, dict] = {}
     
-    async def connect(self, video_id: str) -> Queue:
+    async def connect(self, evaluation_id: str) -> Queue:
         """
-        Register a new SSE connection for a video.
+        Register a new SSE connection for an evaluation.
         Returns a queue that will receive progress updates.
         """
         queue = Queue(maxsize=100)  # Limit queue size to prevent memory issues
         
-        if video_id not in self.connections:
-            self.connections[video_id] = set()
+        if evaluation_id not in self.connections:
+            self.connections[evaluation_id] = set()
         
-        self.connections[video_id].add(queue)
-        logger.info(f"SSE connected for video {video_id} (total: {len(self.connections[video_id])})")
+        self.connections[evaluation_id].add(queue)
+        logger.info(f"SSE connected for evaluation {evaluation_id} (total: {len(self.connections[evaluation_id])})")
         
         return queue
     
-    def disconnect(self, video_id: str, queue: Queue):
+    def disconnect(self, evaluation_id: str, queue: Queue):
         """Remove an SSE connection."""
-        if video_id in self.connections:
-            self.connections[video_id].discard(queue)
+        if evaluation_id in self.connections:
+            self.connections[evaluation_id].discard(queue)
             
-            # Clean up if no more connections for this video
-            if not self.connections[video_id]:
-                del self.connections[video_id]
-                logger.info(f"All SSE connections closed for video {video_id}")
+            # Clean up if no more connections for this evaluation
+            if not self.connections[evaluation_id]:
+                del self.connections[evaluation_id]
+                logger.info(f"All SSE connections closed for evaluation {evaluation_id}")
             else:
-                logger.info(f"SSE disconnected for video {video_id} (remaining: {len(self.connections[video_id])})")
+                logger.info(f"SSE disconnected for evaluation {evaluation_id} (remaining: {len(self.connections[evaluation_id])})")
     
-    def set_video_metadata(self, video_id: str, metadata: dict):
-        """Store video metadata for checkpoint saving."""
-        self.video_metadata[video_id] = metadata
-    
-    async def send_progress(self, video_id: str, stage: str, message: str, progress: int, 
-                           save_checkpoint: bool = True):
+    async def send_progress(self, evaluation_id: str, stage: str, message: str, progress: int):
         """
-        Send progress update to all clients watching this video.
+        Send progress update to all clients watching this evaluation.
         
         Args:
-            video_id: Video identifier
+            evaluation_id: Evaluation identifier
             stage: Current pipeline stage
             message: Progress message
             progress: Progress percentage (0-100)
-            save_checkpoint: Whether to save checkpoint (default: True)
         """
-        if video_id not in self.connections:
+        if evaluation_id not in self.connections:
             return
         
         data = {
@@ -72,49 +64,14 @@ class SSEManager:
             "progress": progress
         }
         
-        # Optimize checkpoint saving: only save at stage boundaries or significant progress
-        should_save = False
-        if save_checkpoint and progress < 100:
-            # Save at major progress milestones
-            milestone_progresses = [10, 20, 30, 40, 50, 60, 70, 80, 85, 92, 98]
-            if progress in milestone_progresses:
-                should_save = True
-        
-        # Save checkpoint to PostgreSQL if needed
-        if should_save:
-            try:
-                from app.db.connection import get_db
-                from app.db.repository import CheckpointRepository
-                
-                # Get stored metadata for this video
-                metadata = self.video_metadata.get(video_id, {})
-                
-                db = next(get_db())
-                checkpoint_repo = CheckpointRepository(db)
-                
-                checkpoint_repo.upsert(
-                    video_id=video_id,
-                    current_stage=stage,
-                    progress=progress,
-                    stage_states={
-                        "batch_video_id": metadata.get("batch_video_id"),
-                        "filename": metadata.get("filename"),
-                        "duration": metadata.get("duration")
-                    }
-                )
-                logger.debug(f"Checkpoint saved to DB for {video_id}: {stage} ({progress}%)")
-                
-            except Exception as e:
-                logger.error(f"Failed to save checkpoint for {video_id}: {e}")
-        
         # Send to all connected clients
         disconnected = set()
-        for queue in self.connections[video_id]:
+        for queue in self.connections[evaluation_id]:
             try:
                 # Non-blocking put with timeout
                 queue.put_nowait(data)
             except asyncio.QueueFull:
-                logger.warning(f"Queue full for video {video_id}, client may be slow")
+                logger.warning(f"Queue full for evaluation {evaluation_id}, client may be slow")
                 disconnected.add(queue)
             except Exception as e:
                 logger.error(f"Failed to send progress: {e}")
@@ -122,31 +79,23 @@ class SSEManager:
         
         # Clean up disconnected clients
         for queue in disconnected:
-            self.disconnect(video_id, queue)
+            self.disconnect(evaluation_id, queue)
     
-    async def send_complete(self, video_id: str):
-        """Send completion message. Keep checkpoint for stage output viewing."""
-        await self.send_progress(video_id, "complete", "Analysis complete", 100, save_checkpoint=False)
-        
-        # Don't delete checkpoint - keep stage outputs for later viewing
-        # The checkpoint can be manually deleted via API if needed
-        logger.debug(f"Video {video_id} completed - checkpoint preserved for stage output viewing")
-        
-        # Clean up metadata
-        if video_id in self.video_metadata:
-            del self.video_metadata[video_id]
+    async def send_complete(self, evaluation_id: str):
+        """Send completion message."""
+        await self.send_progress(evaluation_id, "complete", "Analysis complete", 100)
 
 
 # Global SSE manager instance
 sse_manager = SSEManager()
 
 
-async def event_generator(video_id: str):
+async def event_generator(evaluation_id: str):
     """
     Generator for SSE events.
-    Yields formatted SSE messages for a specific video.
+    Yields formatted SSE messages for a specific evaluation.
     """
-    queue = await sse_manager.connect(video_id)
+    queue = await sse_manager.connect(evaluation_id)
     
     try:
         while True:
@@ -162,6 +111,62 @@ async def event_generator(video_id: str):
                 break
                 
     except asyncio.CancelledError:
-        logger.info(f"SSE stream cancelled for video {video_id}")
+        logger.info(f"SSE stream cancelled for evaluation {evaluation_id}")
     finally:
-        sse_manager.disconnect(video_id, queue)
+        sse_manager.disconnect(evaluation_id, queue)
+
+
+async def broadcast_progress(evaluation_id: str, data: dict):
+    """
+    Broadcast progress update to all clients watching an evaluation.
+    Used by the evaluation pipeline.
+    
+    Data should include:
+    - stage: Current processing stage
+    - message: Human readable message
+    - progress: Progress percentage (0-100)
+    - item_id: (optional) ID of specific item being processed
+    """
+    if evaluation_id not in sse_manager.connections:
+        # No clients are listening - this is normal when no frontend is connected
+        return
+    
+    logger.debug(f"SSE broadcast ({evaluation_id}): {data.get('stage')} to {len(sse_manager.connections[evaluation_id])} clients")
+    
+    # Include item_id in the broadcast if present
+    broadcast_data = {
+        "stage": data.get("stage", "processing"),
+        "message": data.get("message", "Processing..."),
+        "progress": data.get("progress", 0),
+    }
+    
+    if data.get("item_id"):
+        broadcast_data["item_id"] = data["item_id"]
+    
+    # Send to all connected clients
+    disconnected = set()
+    for queue in sse_manager.connections[evaluation_id]:
+        try:
+            queue.put_nowait(broadcast_data)
+        except Exception:
+            disconnected.add(queue)
+    
+    for queue in disconnected:
+        sse_manager.disconnect(evaluation_id, queue)
+
+
+def create_sse_response(evaluation_id: str):
+    """
+    Create an SSE StreamingResponse for an evaluation.
+    """
+    from fastapi.responses import StreamingResponse
+    
+    return StreamingResponse(
+        event_generator(evaluation_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )

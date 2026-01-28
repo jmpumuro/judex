@@ -36,31 +36,29 @@ def save_stage_output(video_id: str, stage_name: str, output: Dict[str, Any]):
     Save stage output to database for real-time retrieval.
     
     This is called by each pipeline node after completing its work.
-    The output is stored in PostgreSQL and can be fetched via API.
+    The output is stored in PostgreSQL (EvaluationItem.stage_outputs) and can be fetched via API.
     
     Args:
-        video_id: Video identifier
+        video_id: Evaluation item ID (not video_id - named for backward compatibility)
         stage_name: Name of the completed stage
         output: Dictionary with stage output data
     """
     if not video_id:
-        logger.warning(f"save_stage_output called without video_id for stage {stage_name}")
+        logger.warning(f"save_stage_output called without item_id for stage {stage_name}")
         return
     
-    logger.info(f"Saving stage output: {stage_name} for video {video_id}")
+    logger.info(f"Saving stage output: {stage_name} for item {video_id}")
     
     try:
-        from app.db.connection import get_db
-        from app.db.repository import CheckpointRepository
+        # Use new EvaluationRepository architecture
+        from app.api.evaluations import EvaluationRepository
         
-        db = next(get_db())
-        checkpoint_repo = CheckpointRepository(db)
-        result = checkpoint_repo.save_stage_output(video_id, stage_name, output)
+        success = EvaluationRepository.save_stage_output(video_id, stage_name, output)
         
-        if result:
-            logger.info(f"✓ Saved output for stage '{stage_name}' (video: {video_id})")
+        if success:
+            logger.info(f"✓ Saved output for stage '{stage_name}' (item: {video_id})")
         else:
-            logger.warning(f"save_stage_output returned None for {video_id}/{stage_name}")
+            logger.warning(f"save_stage_output failed for {video_id}/{stage_name}")
         
     except Exception as e:
         logger.error(f"Failed to save stage output for {video_id}/{stage_name}: {e}", exc_info=True)

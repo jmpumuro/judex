@@ -1,12 +1,16 @@
-# SafeVid - Child Safety Video Analysis Service
+# SafeVid - Generic Video Evaluation Framework
 
-![Version](https://img.shields.io/badge/version-1.0.0-blue)
+![Version](https://img.shields.io/badge/version-1.1.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-**SafeVid** is a comprehensive video content analysis service designed to evaluate videos against child-safety criteria. It uses state-of-the-art AI models including YOLO26, YOLOE, YOLO-World, X-CLIP, Whisper, and text moderation models to provide deterministic safety verdicts with detailed evidence.
+**SafeVid** is a flexible video content evaluation framework that allows users to define custom evaluation criteria, detectors, and scoring rules. It uses state-of-the-art AI models including YOLO26, YOLOE, YOLO-World, X-CLIP, Whisper, and text moderation models to provide deterministic verdicts with detailed evidence.
+
+The framework comes with a **Child Safety preset** (the default) but supports custom evaluation specs for different use cases like brand safety, content moderation, or domain-specific analysis.
 
 ## 🎯 Features
 
+- **Generic Evaluation**: Define custom criteria, detectors, thresholds, and fusion strategies via JSON spec
+- **Presets**: Built-in presets including "child_safety" (default) and "brand_safety"  
 - **Production API**: Simple `/v1/evaluate` endpoint - upload video, get verdict with evidence
 - **Batch Processing**: Upload and process multiple videos simultaneously with individual progress tracking
 - **Live Feed Analysis**: Real-time camera/stream processing with efficient YOLOE detection
@@ -26,15 +30,42 @@
 - **Modern Web UI**: Intuitive interface with video preview, pipeline visualization, and stage-by-stage output inspection
 - **Configurable Policy**: Customize safety thresholds with presets (Strict, Balanced, Lenient)
 
-## 📋 Safety Criteria
+## 📋 Default Criteria (Child Safety Preset)
 
-SafeVid analyzes videos across five key criteria:
+The default "child_safety" preset analyzes videos across five key criteria:
 
 1. **Violence**: Fights, weapons, aggressive behavior (X-CLIP based detection)
 2. **Profanity**: Inappropriate language in audio and text
 3. **Sexual Content**: Adult themes and suggestive material
 4. **Drugs/Substances**: Drug paraphernalia, substance use (YOLO26 detection)
 5. **Hate/Harassment**: Hateful speech and harassment
+
+## 🔧 Generic Evaluation API
+
+The `/v1/evaluate/generic` endpoint accepts a custom `evaluation_spec` JSON that defines:
+
+- **criteria**: What to evaluate (id, label, thresholds, severity)
+- **detectors**: Which detectors to run (YOLO26, X-CLIP, Whisper, OCR, etc.)
+- **routing**: How detector outputs map to criteria
+- **fusion**: How to combine signals into scores (weighted_sum, max, rules)
+- **outputs**: What to include in results (labeled video, evidence, report)
+
+```bash
+# Use a preset
+curl -X POST http://localhost:8012/v1/evaluate/generic \
+     -F "video=@video.mp4" \
+     -F "preset_id=child_safety"
+
+# Use custom spec
+curl -X POST http://localhost:8012/v1/evaluate/generic \
+     -F "video=@video.mp4" \
+     -F "evaluation_spec=@my_spec.json"
+
+# List available presets
+curl http://localhost:8012/v1/presets
+```
+
+See `app/evaluation/spec.py` for the full schema definition.
 
 ## 🏗️ Architecture
 
