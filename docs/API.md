@@ -1,6 +1,6 @@
-# SafeVid API Documentation
+# Judex API Documentation
 
-Complete API reference for the SafeVid child safety video analysis service.
+Complete API reference for the Judex video evaluation framework.
 
 ## 🚀 Quick Links
 
@@ -18,16 +18,11 @@ http://localhost:8012/v1
 ## Table of Contents
 
 - [Health & Status](#health--status)
-- [Video Evaluation](#video-evaluation)
-  - [Production Endpoint](#post-evaluate-production-endpoint) `/v1/evaluate` (Recommended)
-  - [Legacy Endpoint](#post-evaluatesingle-legacy) `/v1/evaluate/single` (Deprecated)
-- [Batch Processing](#batch-processing)
-- [Results Persistence](#results-persistence)
-- [Video Resources](#video-resources)
-- [Policy Configuration](#policy-configuration)
-- [Import Endpoints](#import-endpoints)
-- [Checkpoint Management](#checkpoint-management)
-- [SSE API](#sse-api-server-sent-events)
+- [Evaluation API](#evaluation-api)
+- [Criteria Management](#criteria-management)
+- [Video & Artifacts](#video--artifacts)
+- [SSE Events](#sse-events)
+- [Live Feed](#live-feed)
 - [Response Schemas](#response-schemas)
 - [Error Handling](#error-handling)
 
@@ -35,7 +30,7 @@ http://localhost:8012/v1
 
 ## Health & Status
 
-### GET `/health`
+### GET `/v1/health`
 
 Health check endpoint to verify service availability.
 
@@ -43,18 +38,12 @@ Health check endpoint to verify service availability.
 ```json
 {
   "status": "healthy",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "models_loaded": true
 }
 ```
 
-**Status Codes:**
-- `200` - Service is healthy
-- `503` - Service unavailable
-
----
-
-### GET `/models`
+### GET `/v1/models`
 
 List all configured models and their cache status.
 
@@ -69,42 +58,10 @@ List all configured models and their cache status.
       "status": "ready"
     },
     {
-      "model_id": "yolov8n.pt",
-      "model_type": "vision_realtime",
-      "cached": true,
-      "status": "ready",
-      "description": "YOLOE - Efficient real-time detection for live feeds"
-    },
-    {
-      "model_id": "yolov8s-worldv2.pt",
-      "model_type": "vision_openworld",
-      "cached": true,
-      "status": "ready",
-      "description": "YOLO-World - Open-vocabulary detection for batch pipeline"
-    },
-    {
       "model_id": "microsoft/xclip-base-patch32-16-frames",
       "model_type": "violence",
       "cached": true,
       "status": "ready"
-    },
-    {
-      "model_id": "openai/whisper-small",
-      "model_type": "asr",
-      "cached": true,
-      "status": "ready"
-    },
-    {
-      "model_id": "tarekziade/pardonmyai",
-      "model_type": "moderation",
-      "cached": true,
-      "status": "ready"
-    },
-    {
-      "model_id": "facebook/bart-large-mnli",
-      "model_type": "moderation",
-      "cached": true,
-      "status": "ready"
     }
   ]
 }
@@ -112,203 +69,63 @@ List all configured models and their cache status.
 
 ---
 
-## Video Evaluation
+## Evaluation API
 
-### POST `/evaluate` (Production Endpoint)
+### POST `/v1/evaluate`
 
-**🎯 Recommended for production use**
+**Main evaluation endpoint.** Submit a video for evaluation with optional criteria.
 
-The primary endpoint for video safety evaluation. Accepts video file OR URL and returns complete verdict with evidence.
+**Request (multipart/form-data):**
 
-**Content-Type:** `multipart/form-data`
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `video` | file | Yes* | Video file to evaluate |
+| `url` | string | Yes* | URL to video (alternative to file) |
+| `preset_id` | string | No | Use a preset criteria (e.g., `child_safety`) |
+| `criteria` | string | No | Inline YAML/JSON criteria definition |
 
-**Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `video` | File | Optional* | Video file upload (MP4, AVI, MOV, MKV, WEBM) |
-| `url` | String | Optional* | Video URL (alternative to file upload) |
-| `policy` | String | Optional | JSON string with custom policy configuration |
-
-*Either `video` or `url` must be provided, but not both.
+*Either `video` or `url` is required.
 
 **Examples:**
 
 ```bash
-# Upload file
+# Basic evaluation with default criteria
 curl -X POST http://localhost:8012/v1/evaluate \
   -F "video=@video.mp4"
+
+# With preset
+curl -X POST http://localhost:8012/v1/evaluate \
+  -F "video=@video.mp4" \
+  -F "preset_id=child_safety"
+
+# With custom criteria (inline YAML)
+curl -X POST http://localhost:8012/v1/evaluate \
+  -F "video=@video.mp4" \
+  -F 'criteria=name: custom
+version: "1.0"
+criteria:
+  - id: violence
+    weight: 1.0
+    threshold: 0.5'
 
 # From URL
 curl -X POST http://localhost:8012/v1/evaluate \
   -F "url=https://example.com/video.mp4"
-
-# With custom strict policy
-curl -X POST http://localhost:8012/v1/evaluate \
-  -F "video=@video.mp4" \
-  -F 'policy={"thresholds":{"unsafe":{"violence":0.60,"sexual":0.45}}}'
-```
-
-**Python Example:**
-
-```python
-import requests
-
-# Simple file upload
-response = requests.post(
-    'http://localhost:8012/v1/evaluate',
-    files={'video': open('video.mp4', 'rb')}
-)
-
-result = response.json()
-print(f"Verdict: {result['verdict']}")
-print(f"Violence: {result['scores']['violence']*100:.1f}%")
-```
-
-**Response:**
-
-```json
-{
-  "status": "success",
-  "verdict": "SAFE|CAUTION|UNSAFE|NEEDS_REVIEW",
-  "confidence": 0.85,
-  "processing_time_sec": 45.2,
-  "scores": {
-    "violence": 0.15,
-    "sexual": 0.05,
-    "hate": 0.02,
-    "drugs": 0.08,
-    "profanity": 0.12
-  },
-  "evidence": {
-    "video_metadata": {
-      "duration": 120.5,
-      "fps": 30.0,
-      "resolution": "1920x1080",
-      "has_audio": true
-    },
-    "object_detections": {
-      "total_frames_analyzed": 120,
-      "detections": [...]
-    },
-    "violence_segments": [...],
-    "audio_transcript": [...],
-    "ocr_results": [...],
-    "moderation_flags": [...]
-  },
-  "summary": "AI-generated markdown summary...",
-  "model_versions": {...},
-  "policy_applied": {...}
-}
-```
-
-**Verdict Types:**
-
-- `SAFE` - Content is safe for all audiences
-- `CAUTION` - Content has minor concerns, review recommended
-- `UNSAFE` - Content violates safety policies
-- `NEEDS_REVIEW` - Ambiguous content requiring manual review
-
-**Status Codes:**
-
-- `200` - Success
-- `400` - Invalid parameters or missing required fields
-- `500` - Processing error
-
-**Performance:**
-
-- Typical processing time: 30-60 seconds for a 2-minute video
-- Max file size: 500MB
-- Supported formats: MP4, AVI, MOV, MKV, WEBM
-
----
-
-### POST `/evaluate/single` (Legacy)
-
-**⚠️ DEPRECATED**: Use `/v1/evaluate` instead
-
-Legacy endpoint with SSE/WebSocket tracking support. Used internally by the UI for real-time progress updates.
-
-**Request:**
-
-Content-Type: `multipart/form-data`
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `file` | File | Yes | Video file (MP4, AVI, MOV, etc.) |
-| `video_id` | String | No | Video ID for SSE/WebSocket tracking |
-| `policy` | String | No | JSON string with policy overrides |
-
-**Response:** See [VideoEvaluationResponse](#videoevaluationresponse)
-
----
-
-## Batch Processing
-
-### POST `/evaluate/batch`
-
-Evaluate multiple videos in a single batch.
-
-**Request:**
-
-Content-Type: `multipart/form-data`
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `files` | File[] | Yes | Multiple video files |
-| `policy` | String | No | JSON string with policy overrides (applies to all videos) |
-
-**Example (cURL):**
-```bash
-curl -X POST http://localhost:8012/v1/evaluate/batch \
-  -F "files=@video1.mp4" \
-  -F "files=@video2.mp4" \
-  -F "files=@video3.mp4" \
-  | jq .
-```
-
-**Example (Python):**
-```python
-import requests
-
-files = [
-    ('files', ('video1.mp4', open('video1.mp4', 'rb'), 'video/mp4')),
-    ('files', ('video2.mp4', open('video2.mp4', 'rb'), 'video/mp4')),
-    ('files', ('video3.mp4', open('video3.mp4', 'rb'), 'video/mp4')),
-]
-
-response = requests.post(
-    "http://localhost:8012/v1/evaluate/batch",
-    files=files
-)
-
-batch_info = response.json()
-print(f"Batch ID: {batch_info['batch_id']}")
-print(f"Total Videos: {batch_info['total_videos']}")
 ```
 
 **Response:**
 ```json
 {
-  "batch_id": "550e8400-e29b-41d4-a716-446655440000",
+  "evaluation_id": "abc123",
   "status": "processing",
-  "total_videos": 3,
-  "videos": [
+  "created_at": "2026-01-28T12:00:00Z",
+  "items": [
     {
-      "video_id": "123e4567-e89b-12d3-a456-426614174000",
-      "filename": "video1.mp4",
-      "status": "queued",
-      "progress": 0,
-      "current_stage": null,
-      "result": null
-    },
-    {
-      "video_id": "123e4567-e89b-12d3-a456-426614174001",
-      "filename": "video2.mp4",
-      "status": "queued",
-      "progress": 0,
-      "current_stage": null,
-      "result": null
+      "id": "item-456",
+      "filename": "video.mp4",
+      "status": "processing",
+      "current_stage": "ingest",
+      "progress": 10
     }
   ]
 }
@@ -316,417 +133,451 @@ print(f"Total Videos: {batch_info['total_videos']}")
 
 ---
 
-### GET `/evaluate/batch/{batch_id}`
+### GET `/v1/evaluations`
 
-Get status and results for a batch of videos.
+List all evaluations with optional filtering.
 
-**Path Parameters:**
-- `batch_id` (string, required) - The batch ID returned from POST `/evaluate/batch`
+**Query Parameters:**
 
-**Example:**
-```bash
-curl http://localhost:8012/v1/evaluate/batch/550e8400-e29b-41d4-a716-446655440000 | jq .
-```
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `limit` | int | 20 | Maximum results to return |
+| `offset` | int | 0 | Pagination offset |
+| `status` | string | - | Filter by status (`pending`, `processing`, `completed`, `failed`) |
 
 **Response:**
 ```json
 {
-  "batch_id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "completed",
-  "total_videos": 3,
-  "completed": 3,
-  "failed": 0,
-  "videos": {
-    "123e4567-e89b-12d3-a456-426614174000": {
-      "video_id": "123e4567-e89b-12d3-a456-426614174000",
-      "filename": "video1.mp4",
+  "evaluations": [
+    {
+      "id": "abc123",
       "status": "completed",
-      "progress": 100,
-      "current_stage": "complete",
-      "result": {
-        /* VideoEvaluationResponse object */
-      }
-    }
-  }
-}
-```
-
-**Batch Status Values:**
-- `processing` - Batch is being processed
-- `completed` - All videos completed
-- `partial` - Some videos completed, some failed
-
-**Video Status Values:**
-- `queued` - Waiting to be processed
-- `processing` - Currently being analyzed
-- `completed` - Successfully completed
-- `failed` - Processing failed
-
-**Status Codes:**
-- `200` - Success
-- `404` - Batch not found
-
----
-
-## Results Persistence
-
-### POST `/results/save`
-
-Save analysis results to persistent storage.
-
-**Request:**
-```json
-{
-  "results": [
-    {
-      "id": "video-uuid",
-      "filename": "video.mp4",
-      "verdict": "UNSAFE",
-      "result": {
-        /* Full VideoEvaluationResponse */
-      },
-      "timestamp": "2026-01-26T10:30:00Z"
-    }
-  ]
-}
-```
-
-**Response:**
-```json
-{
-  "message": "Saved 1 result(s)",
-  "count": 1
-}
-```
-
----
-
-### GET `/results/load`
-
-Load all saved results from persistent storage.
-
-**Response:**
-```json
-{
-  "results": [
-    {
-      "id": "video-uuid",
-      "filename": "video.mp4",
-      "verdict": "UNSAFE",
-      "result": { /* ... */ },
-      "timestamp": "2026-01-26T10:30:00Z"
+      "created_at": "2026-01-28T12:00:00Z",
+      "items": [...]
     }
   ],
-  "count": 1
+  "total": 42,
+  "limit": 20,
+  "offset": 0
 }
 ```
 
 ---
 
-### DELETE `/results/{video_id}`
+### GET `/v1/evaluations/{evaluation_id}`
 
-Delete a specific saved result.
+Get detailed evaluation status and results.
 
-**Path Parameters:**
-- `video_id` (string, required) - The video ID to delete
+**Response (completed):**
+```json
+{
+  "id": "abc123",
+  "status": "completed",
+  "criteria_id": "child_safety",
+  "created_at": "2026-01-28T12:00:00Z",
+  "completed_at": "2026-01-28T12:05:00Z",
+  "items": [
+    {
+      "id": "item-456",
+      "filename": "video.mp4",
+      "status": "completed",
+      "current_stage": "completed",
+      "progress": 100,
+      "result": {
+        "verdict": "UNSAFE",
+        "confidence": 0.87,
+        "criteria_scores": {
+          "violence": {
+            "score": 0.85,
+            "verdict": "UNSAFE",
+            "label": "Violence Detection",
+            "severity": "high"
+          },
+          "profanity": {
+            "score": 0.12,
+            "verdict": "SAFE",
+            "label": "Profanity Detection",
+            "severity": "low"
+          }
+        },
+        "violations": [...],
+        "processing_time": 45.2,
+        "report": "AI-generated summary..."
+      },
+      "uploaded_video_path": "uploaded/item-456/video.mp4",
+      "labeled_video_path": "labeled/item-456/labeled.mp4",
+      "stage_outputs": {...}
+    }
+  ]
+}
+```
+
+---
+
+### DELETE `/v1/evaluations/{evaluation_id}`
+
+Delete an evaluation and all associated artifacts.
 
 **Response:**
 ```json
 {
-  "message": "Result deleted"
+  "status": "deleted",
+  "evaluation_id": "abc123"
 }
 ```
 
 ---
 
-### DELETE `/results`
+### GET `/v1/evaluations/{evaluation_id}/stages`
 
-Clear all saved results.
+List all stages and their status for an evaluation.
 
 **Response:**
 ```json
 {
-  "message": "All results cleared"
+  "evaluation_id": "abc123",
+  "item_id": "item-456",
+  "stages": {
+    "ingest": {"status": "completed", "progress": 100},
+    "segment": {"status": "completed", "progress": 100},
+    "yolo26": {"status": "completed", "progress": 100},
+    "violence": {"status": "processing", "progress": 50}
+  }
 }
 ```
 
 ---
 
-## Video Resources
+### GET `/v1/evaluations/{evaluation_id}/stages/{stage}`
 
-### GET `/video/labeled/{video_id}`
+Get detailed output for a specific stage.
 
-Download the labeled video with bounding boxes.
+**Query Parameters:**
+- `item_id` (optional): Specific item ID
 
-**Path Parameters:**
-- `video_id` (string, required) - The video ID from evaluation results
-
-**Response:** Binary video file (MP4, H.264)
-
-**Example:**
-```bash
-curl -O http://localhost:8012/v1/video/labeled/550e8400-e29b-41d4-a716-446655440000
-```
-
-**Status Codes:**
-- `200` - Success
-- `404` - Video not found
-
----
-
-### GET `/video/uploaded/{video_id}`
-
-Download the original uploaded video file.
-
-**Path Parameters:**
-- `video_id` (string, required) - The batch video ID
-
-**Response:** Binary video file (original format)
-
-**Example:**
-```bash
-curl -O http://localhost:8012/v1/video/uploaded/V_101_abc123
-```
-
-**Status Codes:**
-- `200` - Success
-- `404` - Video not found
-
----
-
-## SSE API (Server-Sent Events)
-
-### GET `/sse/{video_id}`
-
-Real-time progress updates for a video being processed using Server-Sent Events (one-way server-to-client stream).
-
-**Connection:**
-```javascript
-const eventSource = new EventSource(`http://localhost:8012/v1/sse/${video_id}`);
-
-eventSource.onmessage = (event) => {
-  const update = JSON.parse(event.data);
-  console.log(`Stage: ${update.stage}, Progress: ${update.progress}%`);
-  
-  if (update.stage === 'complete') {
-    eventSource.close();
-  }
-};
-
-eventSource.onerror = (error) => {
-  console.error('SSE error:', error);
-  eventSource.close();
-};
-```
-
-**Message Format (Server → Client):**
+**Response:**
 ```json
 {
-  "stage": "yolo26_vision",
-  "progress": 30,
-  "message": "Analyzing frames with YOLO26...",
-  "stage_output": {
-    /* Optional stage-specific output */
+  "stage": "yolo26",
+  "status": "completed",
+  "output": {
+    "total_detections": 142,
+    "unique_classes": ["person", "car", "dog"],
+    "frames_processed": 30,
+    "high_confidence_detections": [
+      {
+        "class": "person",
+        "confidence": 0.95,
+        "frame_index": 5,
+        "timestamp": 2.5
+      }
+    ]
   }
 }
 ```
 
-**Pipeline Stages:**
-1. `ingest_video` (6-8%)
-2. `segment_video` (13-18%)
-3. `yolo26_vision` (27-29%)
-4. `yoloworld_vision` (33-34%)
-5. `violence_detection` (46-50%)
-6. `audio_transcription` (60-62%)
-7. `ocr_extraction` (71-73%)
-8. `text_moderation` (82-83%)
-9. `policy_fusion` (94-95%)
-10. `report_generation` (100%)
-11. `finalize` (100%)
-12. `complete` (100%)
+---
 
-**Connection Lifecycle:**
-1. Client connects with video ID via EventSource
-2. Server sends progress updates as processing occurs
-3. Final update with `stage: "complete"`
-4. Server closes connection
+## Criteria Management
 
-**Note:** SSE is preferred over WebSocket for one-way real-time updates as it's simpler and has automatic reconnection built-in.
+### GET `/v1/criteria/presets`
+
+List available built-in presets.
+
+**Response:**
+```json
+{
+  "presets": [
+    {
+      "id": "child_safety",
+      "name": "Child Safety",
+      "description": "Comprehensive child safety evaluation"
+    },
+    {
+      "id": "content_moderation", 
+      "name": "Content Moderation",
+      "description": "General content moderation"
+    },
+    {
+      "id": "violence_detection",
+      "name": "Violence Detection",
+      "description": "Focused violence detection"
+    }
+  ]
+}
+```
+
+---
+
+### GET `/v1/criteria/presets/{preset_id}`
+
+Get preset details and schema.
+
+**Response:**
+```json
+{
+  "id": "child_safety",
+  "name": "Child Safety",
+  "description": "Comprehensive child safety evaluation",
+  "content": "name: Child Safety\nversion: \"1.0\"\ncriteria:\n  - id: violence\n    ..."
+}
+```
+
+---
+
+### GET `/v1/criteria/presets/{preset_id}/export`
+
+Export preset as YAML file.
+
+**Response:** YAML content with `Content-Type: application/x-yaml`
+
+---
+
+### GET `/v1/criteria/custom`
+
+List user-defined custom criteria.
+
+**Response:**
+```json
+{
+  "criteria": [
+    {
+      "id": "my-criteria-123",
+      "name": "My Custom Criteria",
+      "created_at": "2026-01-28T12:00:00Z"
+    }
+  ]
+}
+```
+
+---
+
+### POST `/v1/criteria/custom`
+
+Create a new custom criteria.
+
+**Request (multipart/form-data):**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `content` | string | Yes | YAML or JSON criteria definition |
+
+**Response:**
+```json
+{
+  "id": "custom-abc123",
+  "name": "My Custom Criteria",
+  "status": "valid"
+}
+```
+
+---
+
+### POST `/v1/criteria/validate`
+
+Validate criteria without saving.
+
+**Request (multipart/form-data):**
+- `content`: YAML/JSON criteria definition
+
+**Response:**
+```json
+{
+  "valid": true,
+  "criteria": {
+    "name": "My Criteria",
+    "version": "1.0",
+    "criteria": [...]
+  }
+}
+```
+
+Or with errors:
+```json
+{
+  "valid": false,
+  "errors": ["Missing required field: criteria"]
+}
+```
+
+---
+
+## Video & Artifacts
+
+### GET `/v1/evaluations/{evaluation_id}/artifact/{artifact_type}`
+
+Stream video artifact (original or labeled).
+
+**Path Parameters:**
+- `artifact_type`: `uploaded` or `labeled`
+
+**Query Parameters:**
+- `item_id` (optional): Specific item ID
+- `stream` (optional): `true` for streaming response
+
+**Response:** Video stream (`video/mp4`)
+
+---
+
+### GET `/v1/evaluations/{evaluation_id}/frames`
+
+List processed frames with pagination.
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `item_id` | string | - | Specific item ID |
+| `page` | int | 1 | Page number |
+| `page_size` | int | 50 | Items per page (max 200) |
+| `thumbnails` | bool | true | Return thumbnail URLs |
+
+**Response:**
+```json
+{
+  "evaluation_id": "abc123",
+  "item_id": "item-456",
+  "frames": [
+    {
+      "id": "frame_00001_1500",
+      "index": 1,
+      "timestamp": 1.5,
+      "url": "/v1/evaluations/abc123/frames/frame_00001_1500?..."
+    }
+  ],
+  "total": 120,
+  "page": 1,
+  "page_size": 50,
+  "total_pages": 3
+}
+```
+
+---
+
+### GET `/v1/evaluations/{evaluation_id}/frames/{filename}`
+
+Get a specific frame image.
+
+**Query Parameters:**
+- `item_id`: Item ID
+- `stream`: `true` for streaming
+- `thumbnails`: `true` for thumbnail version
+
+**Response:** JPEG image
+
+---
+
+## SSE Events
+
+### GET `/v1/evaluations/{evaluation_id}/events`
+
+Subscribe to real-time evaluation progress via Server-Sent Events.
+
+**Response (SSE stream):**
+```
+event: progress
+data: {"evaluation_id":"abc123","item_id":"item-456","stage":"yolo26","progress":50,"message":"Processing frames..."}
+
+event: stage_complete
+data: {"evaluation_id":"abc123","item_id":"item-456","stage":"yolo26","output":{...}}
+
+event: complete
+data: {"evaluation_id":"abc123","item_id":"item-456","result":{...}}
+
+event: error
+data: {"evaluation_id":"abc123","error":"Processing failed"}
+```
+
+**Example:**
+```bash
+curl -N http://localhost:8012/v1/evaluations/abc123/events
+```
+
+---
+
+## Live Feed
+
+### POST `/v1/live/start`
+
+Start live feed analysis.
+
+**Request:**
+```json
+{
+  "source": "webcam",
+  "detection_interval": 1.0
+}
+```
+
+---
+
+### POST `/v1/live/stop`
+
+Stop live feed analysis.
+
+---
+
+### GET `/v1/live/status`
+
+Get current live feed status.
+
+---
+
+### GET `/v1/live/events`
+
+Get recent live feed events.
 
 ---
 
 ## Response Schemas
 
-### VideoEvaluationResponse
-
-Complete structure of video evaluation results:
+### Evaluation Result
 
 ```json
 {
-  "verdict": "UNSAFE | CAUTION | SAFE",
-  
-  "criteria": {
-    "violence": {
-      "score": 0.88,
-      "status": "violation | caution | ok",
-      "evidence_count": 3,
-      "sources": ["vision", "violence_model"]
-    },
-    "profanity": {
-      "score": 0.12,
-      "status": "ok",
-      "evidence_count": 0,
-      "sources": []
-    },
-    "sexual": {
-      "score": 0.05,
-      "status": "ok",
-      "evidence_count": 0,
-      "sources": []
-    },
-    "drugs": {
-      "score": 0.41,
-      "status": "caution",
-      "evidence_count": 1,
-      "sources": ["vision"]
-    },
-    "hate": {
-      "score": 0.02,
-      "status": "ok",
-      "evidence_count": 0,
-      "sources": []
+  "verdict": "SAFE|CAUTION|UNSAFE",
+  "confidence": 0.0-1.0,
+  "criteria_scores": {
+    "<criterion_id>": {
+      "score": 0.0-1.0,
+      "verdict": "SAFE|CAUTION|UNSAFE",
+      "label": "Human-readable label",
+      "severity": "low|medium|high"
     }
   },
-  
   "violations": [
     {
-      "criterion": "violence",
-      "severity": "high | medium | low",
-      "timestamp_ranges": [[31.2, 38.9], [45.0, 52.3]],
-      "evidence_refs": ["violence_segment_004", "vision_detection_042"],
-      "evidence_summary": "High violence detected in multiple segments"
+      "category": "violence",
+      "score": 0.85,
+      "timestamp": 12.5,
+      "evidence": "Person detected with aggressive behavior"
     }
   ],
-  
-  "evidence": {
-    "vision": [
-      {
-        "frame_index": 42,
-        "timestamp": 42.0,
-        "detections": [
-          {
-            "class": "knife",
-            "confidence": 0.92,
-            "bbox": [120, 340, 180, 420],
-            "criterion": "violence"
-          }
-        ]
-      }
-    ],
-    
-    "violence_segments": [
-      {
-        "segment_id": 4,
-        "start_time": 31.2,
-        "end_time": 34.2,
-        "violence_score": 0.88,
-        "frame_indices": [31, 32, 33, 34]
-      }
-    ],
-    
-    "asr": {
-      "full_text": "Complete video transcript...",
-      "language": "en",
-      "chunks": [
-        {
-          "text": "Transcribed speech segment",
-          "start_time": 10.5,
-          "end_time": 14.2
-        }
-      ]
-    },
-    
-    "ocr": [
-      {
-        "frame_index": 120,
-        "timestamp": 120.0,
-        "text": "Combined detected text",
-        "detections": [
-          {
-            "text": "Specific text",
-            "confidence": 0.95,
-            "bbox": [200, 100, 400, 150]
-          }
-        ]
-      }
-    ],
-    
-    "moderation": {
-      "profanity_segments": [
-        {
-          "text": "inappropriate language",
-          "score": 0.89,
-          "source": "asr | ocr",
-          "timestamp": 45.2
-        }
-      ],
-      "sexual_segments": [],
-      "hate_segments": [],
-      "drugs_segments": []
-    }
-  },
-  
-  "transcript": {
-    "full_text": "Complete transcript...",
-    "chunks": [ /* ... */ ]
-  },
-  
-  "report": "AI-generated human-friendly summary (if OpenAI configured)",
-  
-  "labeled_video_path": "/tmp/safevid/work_xyz/labeled.mp4",
-  
-  "metadata": {
-    "video_id": "550e8400-e29b-41d4-a716-446655440000",
-    "duration": 120.5,
-    "fps": 30.0,
-    "width": 1920,
-    "height": 1080,
-    "has_audio": true,
-    "frames_analyzed": 120,
-    "segments_analyzed": 40,
-    "detections_count": 15,
-    "violence_segments_count": 2,
-    "ocr_results_count": 8,
-    "processing_time": 45.2
-  },
-  
-  "timings": {
-    "total_seconds": 45.2,
-    "ingest_video": 1.2,
-    "segment_video": 3.5,
-    "yolo26_vision": 12.8,
-    "violence_detection": 18.4,
-    "audio_transcription": 5.3,
-    "ocr_extraction": 2.1,
-    "text_moderation": 0.8,
-    "policy_fusion": 0.3,
-    "report_generation": 0.6,
-    "finalize": 0.2
-  }
+  "processing_time": 45.2,
+  "report": "Optional AI-generated summary"
 }
 ```
 
-### Verdict Values
+### Criteria Schema
 
-- **UNSAFE**: Video violates child safety criteria and should be blocked
-- **CAUTION**: Video contains concerning content requiring review
-- **SAFE**: Video is appropriate for children
-
-### Criterion Status Values
-
-- **violation**: Score exceeds unsafe threshold
-- **caution**: Score exceeds caution threshold but not unsafe
-- **ok**: Score below caution threshold
+```yaml
+name: string (required)
+version: string (required)
+description: string (optional)
+criteria:
+  - id: string (required)
+    label: string (optional)
+    description: string (optional)
+    weight: float (0.0-1.0, default: 1.0)
+    threshold: float (0.0-1.0, default: 0.5)
+    keywords: list[string] (optional)
+fusion:
+  strategy: weighted_average|max|min|custom (default: weighted_average)
+verdict:
+  strategy: threshold|majority|any (default: threshold)
+  safe_threshold: float (default: 0.3)
+  unsafe_threshold: float (default: 0.7)
+```
 
 ---
 
@@ -737,64 +588,33 @@ Complete structure of video evaluation results:
 ```json
 {
   "detail": "Error message",
-  "error_type": "ValidationError | ProcessingError | NotFoundError"
+  "status_code": 400
 }
 ```
 
-### Common Error Codes
+### Common Status Codes
 
-| Code | Meaning | Common Causes |
-|------|---------|---------------|
-| 400 | Bad Request | Invalid file format, missing required fields |
-| 404 | Not Found | Batch ID or video ID not found |
-| 413 | Payload Too Large | Video file exceeds size limit |
-| 422 | Unprocessable Entity | Invalid JSON in policy parameter |
-| 500 | Internal Server Error | Model loading error, processing failure |
-| 503 | Service Unavailable | Service not ready, models not loaded |
+| Code | Meaning |
+|------|---------|
+| 200 | Success |
+| 201 | Created |
+| 400 | Bad Request (invalid input) |
+| 404 | Not Found |
+| 422 | Validation Error |
+| 500 | Internal Server Error |
+| 503 | Service Unavailable |
 
-### Example Error Response
-
-```json
-{
-  "detail": "Unsupported video format. Supported formats: mp4, avi, mov, mkv",
-  "error_type": "ValidationError"
-}
-```
-
----
-
-## Policy Override Structure
-
-Override default thresholds and processing parameters per request:
+### Validation Errors
 
 ```json
 {
-  "thresholds": {
-    "unsafe": {
-      "violence": 0.75,
-      "sexual": 0.60,
-      "hate": 0.60,
-      "drugs": 0.70,
-      "profanity": 0.80
-    },
-    "caution": {
-      "violence": 0.40,
-      "sexual": 0.30,
-      "hate": 0.30,
-      "drugs": 0.40,
-      "profanity": 0.40
+  "detail": [
+    {
+      "loc": ["body", "video"],
+      "msg": "field required",
+      "type": "value_error.missing"
     }
-  },
-  "weights": {
-    "violence": 1.5,
-    "sexual": 1.2,
-    "hate": 1.0,
-    "drugs": 1.0,
-    "profanity": 0.8
-  },
-  "sampling_fps": 1.0,
-  "segment_duration": 3.0,
-  "ocr_interval": 2.0
+  ]
 }
 ```
 
@@ -802,105 +622,17 @@ Override default thresholds and processing parameters per request:
 
 ## Rate Limits
 
-Currently no rate limits are enforced in development mode. For production deployment, consider:
-
-- Max concurrent batch jobs: Configurable
-- Max videos per batch: Unlimited (adjust based on resources)
-- Max file size: 500MB (configurable)
-- WebSocket connection timeout: 1 hour
+No rate limits are enforced by default. For production deployments, consider adding rate limiting at the reverse proxy level.
 
 ---
 
-## Best Practices
+## Authentication
 
-1. **Batch Processing**: Use batch endpoint for multiple videos to leverage parallel processing
-2. **WebSocket Monitoring**: Connect to WebSocket before starting processing for real-time updates
-3. **Result Persistence**: Save important results using persistence API for audit trails
-4. **Error Handling**: Always check response status codes and handle errors gracefully
-5. **Resource Cleanup**: Labeled videos are temporary; download immediately if needed
-6. **Policy Overrides**: Use sparingly; default thresholds are tuned for safety
+Authentication is not enabled by default. For production, implement authentication via:
+- API keys in headers
+- OAuth2/JWT tokens
+- Reverse proxy authentication
 
 ---
 
-## Examples
-
-### Complete Workflow Example (Python)
-
-```python
-import requests
-import json
-import websocket
-import threading
-
-API_URL = "http://localhost:8012/v1"
-
-# 1. Submit batch for processing
-files = [
-    ('files', ('video1.mp4', open('video1.mp4', 'rb'), 'video/mp4')),
-    ('files', ('video2.mp4', open('video2.mp4', 'rb'), 'video/mp4')),
-]
-
-response = requests.post(f"{API_URL}/evaluate/batch", files=files)
-batch = response.json()
-batch_id = batch['batch_id']
-
-print(f"Batch submitted: {batch_id}")
-
-# 2. Connect WebSocket for first video
-video_id = batch['videos'][0]['video_id']
-
-def on_message(ws, message):
-    data = json.loads(message)
-    print(f"Progress: {data['progress']}% - {data['stage']}")
-
-def on_error(ws, error):
-    print(f"WebSocket error: {error}")
-
-ws = websocket.WebSocketApp(
-    f"ws://localhost:8012/v1/ws/{video_id}",
-    on_message=on_message,
-    on_error=on_error
-)
-
-threading.Thread(target=ws.run_forever, daemon=True).start()
-
-# 3. Poll for batch completion
-import time
-while True:
-    response = requests.get(f"{API_URL}/evaluate/batch/{batch_id}")
-    batch_status = response.json()
-    
-    if batch_status['status'] == 'completed':
-        break
-    
-    time.sleep(5)
-
-# 4. Process results
-for video_id, video_data in batch_status['videos'].items():
-    result = video_data['result']
-    print(f"\n{video_data['filename']}: {result['verdict']}")
-    
-    # Download labeled video
-    if 'labeled_video_path' in result:
-        labeled_response = requests.get(f"{API_URL}/video/labeled/{video_id}")
-        with open(f"labeled_{video_data['filename']}", 'wb') as f:
-            f.write(labeled_response.content)
-    
-    # Save results
-    save_data = {
-        "results": [{
-            "id": video_id,
-            "filename": video_data['filename'],
-            "verdict": result['verdict'],
-            "result": result,
-            "timestamp": "2026-01-26T10:30:00Z"
-        }]
-    }
-    requests.post(f"{API_URL}/results/save", json=save_data)
-
-print("\nBatch processing complete!")
-```
-
----
-
-For more information, see the [main README](../README.md) or [Setup Guide](SETUP.md).
+**For architecture details, see [ARCHITECTURE.md](ARCHITECTURE.md). For setup instructions, see [SETUP.md](SETUP.md).**

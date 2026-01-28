@@ -1,10 +1,10 @@
 services:
-  safevid:
+  judex:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    image: safevid:latest
-    container_name: safevid
+    image: judex:latest
+    container_name: judex
     ports:
       - "8012:8000"
     environment:
@@ -24,21 +24,21 @@ services:
       - OPENAI_MODEL=gpt-4o-mini
       
       # Database (PostgreSQL)
-      - DATABASE_URL=postgresql://docker:docker@host.docker.internal:5432/safevid
+      - DATABASE_URL=postgresql://docker:docker@host.docker.internal:5432/judex
       
       # MinIO Object Storage
       - MINIO_ENDPOINT=minio:9000
       - MINIO_EXTERNAL_ENDPOINT=localhost:9000
-      - MINIO_ACCESS_KEY=safevid
-      - MINIO_SECRET_KEY=safevid123
-      - MINIO_BUCKET=safevid
+      - MINIO_ACCESS_KEY=judex
+      - MINIO_SECRET_KEY=judex123
+      - MINIO_BUCKET=judex
       - MINIO_SECURE=false
       
       # Cache directories
       - HF_HOME=/models/hf
       - TRANSFORMERS_CACHE=/models/hf/transformers
-      - TEMP_DIR=/tmp/safevid
-      - DATA_DIR=/data/safevid
+      - TEMP_DIR=/tmp/judex
+      - DATA_DIR=/data/judex
       
       # Processing settings
       - DEFAULT_SAMPLING_FPS=1.0
@@ -49,11 +49,11 @@ services:
     volumes:
       # Persist model cache on LOCAL DISK (not Docker volume)
       # Models are downloaded once and reused across container rebuilds
-      - ~/.cache/safevid/models:/models
+      - ~/.cache/judex/models:/models
       # Temporary processing directory
-      - temp_data:/tmp/safevid
+      - temp_data:/tmp/judex
       # Local fallback data
-      - results_data:/data/safevid
+      - results_data:/data/judex
     
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -77,13 +77,13 @@ services:
   # MinIO Object Storage (S3-compatible)
   minio:
     image: minio/minio:latest
-    container_name: safevid-minio
+    container_name: judex-minio
     ports:
       - "9000:9000"   # API
       - "9001:9001"   # Console
     environment:
-      - MINIO_ROOT_USER=safevid
-      - MINIO_ROOT_PASSWORD=safevid123
+      - MINIO_ROOT_USER=judex
+      - MINIO_ROOT_PASSWORD=judex123
     command: server /data --console-address ":9001"
     volumes:
       - minio_data:/data

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Example usage of the SafeVid /v1/evaluate API endpoint.
+Example usage of the Judex /v1/evaluate API endpoint.
 
 This is a production-ready API that takes a video (file or URL) and returns
 a complete verdict with evidence, scores, and detailed analysis.
@@ -177,7 +177,7 @@ def example_with_custom_policy():
 
 
 if __name__ == "__main__":
-    print("SafeVid Evaluation API - Example Usage")
+    print("Judex Evaluation API - Example Usage")
     print("=" * 60)
     
     if len(sys.argv) < 2:

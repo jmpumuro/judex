@@ -1,14 +1,22 @@
 """
 Video segmentation node - create time windows and frame sampling plan.
 Optimized for VideoMAE's 16-frame architecture with overlapping segments.
+Saves keyframes and thumbnails for UI display.
 """
+import cv2
 from pathlib import Path
 from app.pipeline.state import PipelineState
 from app.core.logging import get_logger
 from app.utils.ffmpeg import extract_frames, extract_segment_frames
 from app.utils.progress import send_progress, save_stage_output, format_stage_output
+from app.utils.storage import get_storage_service
 
 logger = get_logger("node.segment")
+
+# Thumbnail settings for filmstrip display
+THUMB_WIDTH = 120
+THUMB_HEIGHT = 68  # 16:9 aspect ratio
+KEYFRAME_INTERVAL = 1  # Save a keyframe every N sampled frames (1 = all frames at 1fps)
 
 
 def segment_video(state: PipelineState) -> PipelineState:
@@ -66,6 +74,49 @@ def segment_video(state: PipelineState) -> PipelineState:
         
         state["sampled_frames"] = sampled_frames
         logger.info(f"Extracted {len(sampled_frames)} frames for vision analysis")
+        
+        # Save keyframes and thumbnails to MinIO for UI display
+        # Industry standard: save full-size keyframes + small thumbnails for filmstrip
+        video_id = state.get("video_id")
+        if video_id:
+            try:
+                storage = get_storage_service()
+                keyframe_count = 0
+                thumbnail_count = 0
+                
+                send_progress(state.get("progress_callback"), "segment_video", "Generating thumbnails for filmstrip", 40)
+                
+                for frame_info in sampled_frames:
+                    frame_idx = frame_info["frame_index"]
+                    
+                    # Save keyframe at intervals (reduces storage while keeping useful frames)
+                    if frame_idx % KEYFRAME_INTERVAL == 0:
+                        frame_path = frame_info["path"]
+                        timestamp = frame_info["timestamp"]
+                        
+                        # Read the original frame
+                        img = cv2.imread(frame_path)
+                        if img is None:
+                            continue
+                        
+                        # Upload full-size keyframe
+                        with open(frame_path, 'rb') as f:
+                            frame_data = f.read()
+                        storage.upload_frame(frame_data, video_id, frame_idx, timestamp)
+                        keyframe_count += 1
+                        
+                        # Generate and upload thumbnail for filmstrip
+                        thumb = cv2.resize(img, (THUMB_WIDTH, THUMB_HEIGHT), interpolation=cv2.INTER_AREA)
+                        _, thumb_data = cv2.imencode('.jpg', thumb, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                        storage.upload_frame_thumbnail(thumb_data.tobytes(), video_id, frame_idx, timestamp)
+                        thumbnail_count += 1
+                
+                state["frames_saved"] = keyframe_count
+                state["thumbnails_saved"] = thumbnail_count
+                logger.info(f"Saved {keyframe_count} keyframes and {thumbnail_count} thumbnails to storage")
+                
+            except Exception as e:
+                logger.warning(f"Failed to save frames to storage: {e}")
         
     except Exception as e:
         logger.error(f"Frame extraction failed: {e}")

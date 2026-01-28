@@ -1,5 +1,5 @@
 """
-SQLAlchemy database models for SafeVid.
+SQLAlchemy database models for Judex.
 
 Evaluation-centric schema:
 - Evaluation: Primary entity - represents an evaluation request

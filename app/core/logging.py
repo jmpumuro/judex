@@ -1,5 +1,5 @@
 """
-Logging configuration for SafeVid service.
+Logging configuration for Judex service.
 """
 import logging
 import sys
@@ -18,7 +18,7 @@ def setup_logging(level: str = "INFO") -> logging.Logger:
         ]
     )
     
-    logger = logging.getLogger("safevid")
+    logger = logging.getLogger("judex")
     logger.setLevel(getattr(logging, level.upper()))
     
     return logger
@@ -31,5 +31,5 @@ logger = setup_logging()
 def get_logger(name: Optional[str] = None) -> logging.Logger:
     """Get a logger instance."""
     if name:
-        return logging.getLogger(f"safevid.{name}")
+        return logging.getLogger(f"judex.{name}")
     return logger

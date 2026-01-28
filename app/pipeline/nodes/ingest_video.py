@@ -4,6 +4,7 @@ Normalizes video to consistent format for downstream models:
 - Constant FPS (30fps)
 - Stable resolution (720p, preserving aspect ratio)
 - Extract audio to mono 16kHz WAV for ASR
+- Upload original video to storage for immediate viewing
 """
 import uuid
 from pathlib import Path
@@ -13,6 +14,7 @@ from app.core.logging import get_logger
 from app.utils.video import validate_video_file, create_working_directory
 from app.utils.ffmpeg import get_video_metadata, normalize_video
 from app.utils.progress import send_progress, save_stage_output, format_stage_output
+from app.utils.storage import get_storage_service
 
 logger = get_logger("node.ingest")
 
@@ -41,6 +43,24 @@ def ingest_video(state: PipelineState) -> PipelineState:
     # Use existing video_id from state (passed from API) or generate new one
     video_id = state.get("video_id") or str(uuid.uuid4())
     state["video_id"] = video_id
+    
+    # Upload original video to storage immediately for early viewing
+    # This allows users to see the video before processing completes
+    # Skip if already uploaded (e.g., via API upload endpoint)
+    if not state.get("uploaded_video_path"):
+        try:
+            send_progress(state.get("progress_callback"), "ingest_video", "Uploading original video", 15)
+            
+            storage = get_storage_service()
+            uploaded_path = storage.upload_video(video_path, video_id)
+            state["uploaded_video_path"] = uploaded_path
+            logger.info(f"Original video uploaded to storage: {uploaded_path}")
+            
+        except Exception as e:
+            logger.warning(f"Failed to upload original video to storage: {e}")
+            # Non-fatal - continue processing
+    else:
+        logger.info(f"Original video already uploaded: {state['uploaded_video_path']}")
     
     # Create working directory using the video_id
     work_dir = create_working_directory(settings.temp_dir, video_id)

@@ -1,5 +1,5 @@
 """
-Example usage of SafeVid API.
+Example usage of Judex API.
 """
 import requests
 import json
@@ -193,5 +193,5 @@ if __name__ == "__main__":
         # example_batch()
         
     except requests.exceptions.ConnectionError:
-        print("Error: Could not connect to SafeVid service")
+        print("Error: Could not connect to Judex service")
         print("Make sure the service is running: docker compose up")

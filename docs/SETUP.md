@@ -1,6 +1,6 @@
-# SafeVid Setup Guide
+# Judex Setup Guide
 
-Complete setup and deployment guide for the SafeVid child safety video analysis service.
+Complete setup and deployment guide for the Judex video evaluation framework.
 
 ## Table of Contents
 
@@ -8,7 +8,6 @@ Complete setup and deployment guide for the SafeVid child safety video analysis 
 - [Quick Start with Docker](#quick-start-with-docker)
 - [Local Development Setup](#local-development-setup)
 - [Environment Configuration](#environment-configuration)
-- [Model Management](#model-management)
 - [Production Deployment](#production-deployment)
 - [Troubleshooting](#troubleshooting)
 
@@ -18,493 +17,354 @@ Complete setup and deployment guide for the SafeVid child safety video analysis 
 
 ### Minimum Requirements
 
-- **OS**: Linux, macOS, or Windows with WSL2
-- **RAM**: 8GB (16GB recommended for production)
-- **Storage**: 20GB free space (models + temporary files)
-- **CPU**: 4 cores minimum (8+ recommended)
-- **GPU**: Optional (CUDA-compatible for faster processing)
+| Component | Requirement |
+|-----------|-------------|
+| RAM | 8GB |
+| CPU | 4 cores |
+| Storage | 20GB |
+| Docker | 20.10+ |
+| Docker Compose | 2.0+ |
+| PostgreSQL | 14+ |
 
-### Software Dependencies
+### Recommended (Development)
 
-- **Docker**: 20.10+ and Docker Compose 2.0+
-- **Python**: 3.9+ (for local development)
-- **FFmpeg**: 4.4+ (included in Docker image)
+| Component | Requirement |
+|-----------|-------------|
+| RAM | 16GB |
+| CPU | 8 cores |
+| GPU | NVIDIA (optional, 8GB+ VRAM) |
+| Storage | 50GB SSD |
+
+### Production
+
+| Component | Requirement |
+|-----------|-------------|
+| RAM | 32GB+ |
+| CPU | 16+ cores |
+| GPU | NVIDIA (16GB+ VRAM) |
+| Storage | 100GB+ SSD |
 
 ---
 
 ## Quick Start with Docker
 
-The fastest way to get SafeVid running is with Docker Compose.
+The fastest way to get Judex running is with Docker Compose.
 
-### 1. Clone the Repository
+### 1. Prerequisites
 
 ```bash
+# macOS
+brew install postgresql docker
+
+# Start PostgreSQL
+brew services start postgresql
+
+# Ubuntu/Debian
+sudo apt update
+sudo apt install postgresql docker.io docker-compose-plugin
+sudo systemctl start postgresql
+```
+
+### 2. Create Database
+
+```bash
+# Create the judex database
+createdb judex
+
+# Verify
+psql -d judex -c "\conninfo"
+```
+
+### 3. Clone and Start
+
+```bash
+# Clone repository
 git clone <repository-url>
 cd safeVid
+
+# Start services (builds on first run)
+docker-compose -f docker/docker-compose.yml up -d
+
+# Watch logs
+docker-compose -f docker/docker-compose.yml logs -f judex
 ```
 
-### 2. Configure Environment (Optional)
+### 4. Access Services
+
+| Service | URL |
+|---------|-----|
+| React Frontend | http://localhost:5173 |
+| API | http://localhost:8012 |
+| API Docs (Swagger) | http://localhost:8012/docs |
+| MinIO Console | http://localhost:9001 |
+
+### 5. Verify
 
 ```bash
-cp env.example .env
-# Edit .env with your settings (OpenAI key, etc.)
-nano .env
-```
-
-### 3. Build and Run
-
-```bash
-# Build and start services
-docker-compose -f docker/docker-compose.yml up --build
-
-# Or run in detached mode
-docker-compose -f docker/docker-compose.yml up -d --build
-```
-
-### 4. Verify Services
-
-```bash
-# Check API health
+# Health check
 curl http://localhost:8012/v1/health
 
-# Check models
-curl http://localhost:8012/v1/models
-
-# Open UI in browser
-open http://localhost:8080
-```
-
-### 5. Stop Services
-
-```bash
-# Stop containers
-docker-compose -f docker/docker-compose.yml down
-
-# Stop and remove volumes (deletes cached models)
-docker-compose -f docker/docker-compose.yml down -v
+# Expected response
+{"status":"healthy","version":"2.0.0","models_loaded":true}
 ```
 
 ---
 
 ## Local Development Setup
 
-For development without Docker, follow these steps:
-
-### 1. Create Virtual Environment
+### Backend Setup
 
 ```bash
-# Create venv
-python3 -m venv venv
-
-# Activate (Linux/macOS)
+# Create virtual environment
+python3.11 -m venv venv
 source venv/bin/activate
 
-# Activate (Windows)
-venv\Scripts\activate
-```
-
-### 2. Install Dependencies
-
-```bash
-# Install Python packages
-pip install --upgrade pip
+# Install dependencies
 pip install -r requirements.txt
 
-# Install test dependencies (optional)
-pip install -r tests/requirements-test.txt
-```
-
-### 3. Install FFmpeg
-
-**Ubuntu/Debian:**
-```bash
-sudo apt update
-sudo apt install ffmpeg
-```
-
-**macOS:**
-```bash
-brew install ffmpeg
-```
-
-**Windows:**
-Download from [ffmpeg.org](https://ffmpeg.org/download.html) and add to PATH.
-
-### 4. Install EasyOCR Dependencies
-
-```bash
-# EasyOCR requires specific system packages
-# Ubuntu/Debian:
-sudo apt install libglib2.0-0 libsm6 libxext6 libxrender-dev libgomp1
-
-# macOS: (usually not needed)
-# Windows: (usually not needed)
-```
-
-### 5. Configure Environment
-
-```bash
-# Copy example env
-cp env.example .env
-
-# Set required paths
+# Set environment variables
+export DATABASE_URL=postgresql://localhost:5432/judex
+export MINIO_ENDPOINT=localhost:9000
+export MINIO_ACCESS_KEY=judex
+export MINIO_SECRET_KEY=judex123
 export HF_HOME=./models/hf
-export TRANSFORMERS_CACHE=./models/hf/transformers
-export TEMP_DIR=./tmp/safevid
-export DATA_DIR=./data/safevid
+export TEMP_DIR=./tmp/judex
 
 # Create directories
-mkdir -p $HF_HOME
-mkdir -p $TEMP_DIR
-mkdir -p $DATA_DIR
+mkdir -p ./models/hf ./tmp/judex
+
+# Run server
+uvicorn app.main:app --reload --port 8012
 ```
 
-### 6. Pre-download Models (Optional but Recommended)
+### Frontend Setup
 
 ```bash
-# Download all models before first run
-python scripts/prefetch_models.py
+# Navigate to frontend
+cd frontend
 
-# This can take 10-20 minutes depending on connection
-# Models are ~5GB total
+# Install dependencies
+npm install
+
+# Start development server
+npm run dev
+
+# Frontend available at http://localhost:5173
 ```
 
-### 7. Run Backend Server
+### MinIO Setup (Local)
 
 ```bash
-# Development mode (auto-reload)
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8012
+# Using Docker
+docker run -d \
+  --name judex-minio \
+  -p 9000:9000 \
+  -p 9001:9001 \
+  -e MINIO_ROOT_USER=judex \
+  -e MINIO_ROOT_PASSWORD=judex123 \
+  minio/minio server /data --console-address ":9001"
 
-# Production mode
-uvicorn app.main:app --host 0.0.0.0 --port 8012 --workers 4
-```
-
-### 8. Run UI Server (separate terminal)
-
-```bash
-cd ui
-python server.py
-
-# UI will be available at http://localhost:8080
+# Or install locally (macOS)
+brew install minio
+minio server ./minio-data --console-address ":9001"
 ```
 
 ---
 
 ## Environment Configuration
 
-### Environment Variables
-
-Create a `.env` file in the project root or set these as system environment variables:
+### Required Variables
 
 ```bash
-# ===== Model Configuration =====
+# Database
+DATABASE_URL=postgresql://docker:docker@localhost:5432/judex
+
+# MinIO Object Storage
+MINIO_ENDPOINT=localhost:9000
+MINIO_ACCESS_KEY=judex
+MINIO_SECRET_KEY=judex123
+MINIO_BUCKET=judex
+MINIO_SECURE=false
+```
+
+### Optional Variables
+
+```bash
+# Model configuration
 YOLO26_MODEL_ID=openvision/yolo26-s
 VIOLENCE_MODEL_ID=microsoft/xclip-base-patch32-16-frames
-USE_XCLIP_VIOLENCE=true
-WHISPER_MODEL_ID=openai/whisper-small
+WHISPER_MODEL_ID=openai/whisper-tiny
 PROFANITY_MODEL_ID=tarekziade/pardonmyai
 NLI_MODEL_ID=facebook/bart-large-mnli
 
-# ===== OpenAI Configuration (Optional) =====
-OPENAI_API_KEY=sk-your-key-here
-OPENAI_MODEL=gpt-4o-mini
+# LLM for reports
+LLM_PROVIDER=template  # "template", "qwen", or "openai"
+OPENAI_API_KEY=sk-...  # Required if LLM_PROVIDER=openai
 
-# ===== Processing Parameters =====
+# Processing settings
 DEFAULT_SAMPLING_FPS=1.0
 SEGMENT_DURATION_SEC=3.0
 VIOLENCE_FRAMES_PER_SEGMENT=16
-OCR_INTERVAL_SEC=2.0
 
-# ===== Policy Thresholds =====
-THRESHOLD_UNSAFE_VIOLENCE=0.75
-THRESHOLD_UNSAFE_SEXUAL=0.60
-THRESHOLD_UNSAFE_HATE=0.60
-THRESHOLD_UNSAFE_DRUGS=0.70
-THRESHOLD_UNSAFE_PROFANITY=0.80
-
-THRESHOLD_CAUTION_VIOLENCE=0.40
-THRESHOLD_CAUTION_SEXUAL=0.30
-THRESHOLD_CAUTION_HATE=0.30
-THRESHOLD_CAUTION_DRUGS=0.40
-THRESHOLD_CAUTION_PROFANITY=0.40
-
-# ===== Scoring Weights =====
-WEIGHT_VIOLENCE=1.5
-WEIGHT_SEXUAL=1.2
-WEIGHT_HATE=1.0
-WEIGHT_DRUGS=1.0
-WEIGHT_PROFANITY=0.8
-
-# ===== Paths =====
+# Paths
 HF_HOME=/models/hf
 TRANSFORMERS_CACHE=/models/hf/transformers
-TEMP_DIR=/tmp/safevid
-DATA_DIR=/data/safevid
-
-# ===== Service Configuration =====
-VERSION=1.0.0
-LOG_LEVEL=INFO
-MAX_WORKERS=4
+TEMP_DIR=/tmp/judex
+DATA_DIR=/data/judex
 ```
 
-### Configuration Hierarchy
+### env.example
 
-Settings are loaded in this order (later overrides earlier):
+Create a `.env` file from the example:
 
-1. Default values in `app/core/config.py`
-2. Environment variables
-3. `.env` file
-4. Per-request policy overrides (API)
-
----
-
-## Model Management
-
-### Model Storage
-
-Models are cached in the location specified by `HF_HOME`:
-
-```
-/models/hf/
-├── hub/
-│   ├── models--openvision--yolo26-s/
-│   ├── models--microsoft--xclip-base-patch32-16-frames/
-│   ├── models--openai--whisper-small/
-│   ├── models--tarekziade--pardonmyai/
-│   └── models--facebook--bart-large-mnli/
-└── transformers/
-    └── (cached transformers files)
-```
-
-### Pre-downloading Models
-
-**Option 1: Use prefetch script**
 ```bash
-python scripts/prefetch_models.py
-```
-
-**Option 2: First-run download**
-```bash
-# Models download automatically on first use
-# This adds ~5-10 minutes to first request
-```
-
-**Option 3: Docker volume**
-```bash
-# Docker automatically caches models in named volume
-# Volume persists between container restarts
-docker volume ls | grep models
-```
-
-### Model Sizes
-
-| Model | Size | Download Time (100 Mbps) |
-|-------|------|--------------------------|
-| YOLO26-S | ~50 MB | ~5 seconds |
-| X-CLIP | ~600 MB | ~50 seconds |
-| Whisper Small | ~500 MB | ~40 seconds |
-| PardonMyAI | ~500 MB | ~40 seconds |
-| BART-Large-MNLI | ~1.6 GB | ~2 minutes |
-| EasyOCR (auto) | ~100 MB | ~10 seconds |
-| **Total** | **~3.4 GB** | **~4 minutes** |
-
-### Changing Models
-
-To use different model variants:
-
-1. Update model ID in `.env`:
-```bash
-# Example: Use larger Whisper model
-WHISPER_MODEL_ID=openai/whisper-medium
-```
-
-2. Restart service:
-```bash
-docker-compose -f docker/docker-compose.yml restart
-```
-
-3. New model downloads automatically on first use
-
-### GPU Acceleration (Optional)
-
-To use GPU for faster processing:
-
-1. Install NVIDIA Container Toolkit:
-```bash
-# Ubuntu/Debian
-distribution=$(. /etc/os-release;echo $ID$VERSION_ID)
-curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | sudo apt-key add -
-curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list | \
-  sudo tee /etc/apt/sources.list.d/nvidia-docker.list
-
-sudo apt update
-sudo apt install -y nvidia-container-toolkit
-sudo systemctl restart docker
-```
-
-2. Update `docker-compose.yml`:
-```yaml
-services:
-  safevid:
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-```
-
-3. Rebuild and run:
-```bash
-docker-compose -f docker/docker-compose.yml up --build
+cp env.example .env
+# Edit .env with your values
 ```
 
 ---
 
 ## Production Deployment
 
-### Docker Production Setup
+### Docker Compose (Production)
 
-1. **Use environment variables for secrets:**
-```bash
-# Don't commit .env to git
-echo ".env" >> .gitignore
-
-# Use secret management in production
-export OPENAI_API_KEY=$(cat /run/secrets/openai_key)
-```
-
-2. **Configure resource limits:**
 ```yaml
-# docker-compose.yml
+# docker-compose.prod.yml
 services:
-  safevid:
+  judex:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: judex:latest
+    container_name: judex
+    ports:
+      - "8012:8000"
+    environment:
+      - DATABASE_URL=postgresql://user:pass@db-host:5432/judex
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+      - LLM_PROVIDER=openai
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - model_cache:/models
     deploy:
       resources:
         limits:
-          cpus: '4'
-          memory: 8G
-        reservations:
-          cpus: '2'
-          memory: 4G
+          cpus: '8'
+          memory: 16G
+    restart: always
+
+volumes:
+  model_cache:
 ```
 
-3. **Enable health checks:**
+### Kubernetes
+
 ```yaml
-healthcheck:
-  test: ["CMD", "curl", "-f", "http://localhost:8012/v1/health"]
-  interval: 30s
-  timeout: 10s
-  retries: 3
-  start_period: 60s
-```
-
-4. **Use production server:**
-```bash
-# Multiple workers for concurrent requests
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8012", "--workers", "4"]
-```
-
-### Kubernetes Deployment
-
-Example Kubernetes manifests:
-
-**Deployment:**
-```yaml
+# judex-deployment.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: safevid
+  name: judex
 spec:
-  replicas: 3
+  replicas: 2
   selector:
     matchLabels:
-      app: safevid
+      app: judex
   template:
     metadata:
       labels:
-        app: safevid
+        app: judex
     spec:
       containers:
-      - name: safevid
-        image: safevid:latest
+      - name: judex
+        image: judex:latest
         ports:
-        - containerPort: 8012
+        - containerPort: 8000
         env:
-        - name: HF_HOME
-          value: /models/hf
-        - name: OPENAI_API_KEY
+        - name: DATABASE_URL
           valueFrom:
             secretKeyRef:
-              name: safevid-secrets
-              key: openai-key
+              name: judex-secrets
+              key: database-url
+        resources:
+          limits:
+            cpu: "4"
+            memory: "12Gi"
+          requests:
+            cpu: "2"
+            memory: "8Gi"
         volumeMounts:
         - name: models
           mountPath: /models
-        - name: data
-          mountPath: /data
-        resources:
-          requests:
-            memory: "4Gi"
-            cpu: "2"
-          limits:
-            memory: "8Gi"
-            cpu: "4"
       volumes:
       - name: models
         persistentVolumeClaim:
-          claimName: safevid-models-pvc
-      - name: data
-        persistentVolumeClaim:
-          claimName: safevid-data-pvc
-```
-
-**Service:**
-```yaml
+          claimName: judex-models-pvc
+---
 apiVersion: v1
 kind: Service
 metadata:
-  name: safevid
+  name: judex
 spec:
   selector:
-    app: safevid
+    app: judex
   ports:
   - port: 8012
-    targetPort: 8012
+    targetPort: 8000
   type: LoadBalancer
 ```
 
-### Monitoring and Logging
+### Nginx Reverse Proxy
 
-1. **Enable structured logging:**
-```python
-# app/core/logging.py already configured
-LOG_LEVEL=INFO  # or DEBUG for verbose
+```nginx
+# /etc/nginx/sites-available/judex
+upstream judex_backend {
+    server 127.0.0.1:8012;
+}
+
+server {
+    listen 80;
+    server_name judex.example.com;
+
+    # Redirect to HTTPS
+    return 301 https://$server_name$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name judex.example.com;
+
+    ssl_certificate /etc/letsencrypt/live/judex.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/judex.example.com/privkey.pem;
+
+    # API
+    location /v1/ {
+        proxy_pass http://judex_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        
+        # SSE support
+        proxy_set_header Connection '';
+        proxy_buffering off;
+        proxy_cache off;
+        chunked_transfer_encoding off;
+    }
+
+    # Frontend (if serving static files)
+    location / {
+        root /var/www/judex/dist;
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Upload size limit
+    client_max_body_size 500M;
+}
 ```
-
-2. **Monitor health endpoint:**
-```bash
-# Set up monitoring to check /v1/health
-curl http://localhost:8012/v1/health
-```
-
-3. **Log aggregation:**
-```bash
-# Docker logs
-docker-compose logs -f safevid
-
-# Export to file
-docker-compose logs safevid > safevid.log
-```
-
-### Scaling Considerations
-
-- **Horizontal Scaling**: Multiple instances behind load balancer
-- **Batch Processing**: Adjust `MAX_WORKERS` based on CPU cores
-- **Model Caching**: Share model volume across instances (read-only)
-- **Result Storage**: Use external database instead of local JSON files
-- **WebSocket**: Consider Redis for WebSocket message broker
 
 ---
 
@@ -512,182 +372,133 @@ docker-compose logs safevid > safevid.log
 
 ### Common Issues
 
-#### 1. Models Not Loading
+#### Container Won't Start
 
-**Symptom:** 500 errors or "models not loaded" message
+```bash
+# Check logs
+docker-compose -f docker/docker-compose.yml logs judex
 
-**Solutions:**
+# Common causes:
+# 1. Database not accessible
+# 2. MinIO not running
+# 3. Insufficient memory
+```
+
+#### Database Connection Failed
+
+```bash
+# Verify PostgreSQL is running
+pg_isready -h localhost -p 5432
+
+# Check connection
+psql -d judex -c "SELECT 1;"
+
+# Create database if missing
+createdb judex
+```
+
+#### MinIO Connection Failed
+
+```bash
+# Check MinIO is running
+curl http://localhost:9000/minio/health/live
+
+# Verify credentials
+mc alias set local http://localhost:9000 judex judex123
+mc ls local/
+```
+
+#### Models Not Loading
+
 ```bash
 # Check model cache
-ls -la $HF_HOME/hub/
+ls -la ~/.cache/judex/models/
 
-# Re-download models
-rm -rf $HF_HOME/hub/
-python scripts/prefetch_models.py
-
-# Check disk space
-df -h
+# Clear cache and redownload
+rm -rf ~/.cache/judex/models/
+docker-compose -f docker/docker-compose.yml restart judex
 ```
 
-#### 2. Out of Memory
+#### Out of Memory
 
-**Symptom:** Container crashes or OOM kills
-
-**Solutions:**
 ```bash
 # Increase Docker memory limit
-# Docker Desktop → Settings → Resources → Memory → 8GB+
+# Docker Desktop: Preferences > Resources > Memory
 
-# Reduce concurrent workers
-export MAX_WORKERS=2
-
-# Use smaller models
+# Or use smaller models
 export WHISPER_MODEL_ID=openai/whisper-tiny
+export LLM_PROVIDER=template  # Disable Qwen
 ```
 
-#### 3. FFmpeg Errors
+### Debug Commands
 
-**Symptom:** Video processing fails with FFmpeg errors
-
-**Solutions:**
 ```bash
-# Test FFmpeg
-ffmpeg -version
+# Container shell
+docker exec -it judex bash
 
-# Reinstall in Docker
-docker-compose -f docker/docker-compose.yml build --no-cache
+# Python shell
+docker exec -it judex python
 
-# Check video file
-ffprobe video.mp4
+# Check processes
+docker exec judex ps aux
+
+# View resource usage
+docker stats judex
 ```
 
-#### 4. WebSocket Connection Fails
-
-**Symptom:** No progress updates in UI
-
-**Solutions:**
-```bash
-# Check WebSocket endpoint
-wscat -c ws://localhost:8012/v1/ws/test-id
-
-# Check CORS settings
-# app/main.py has CORS configured for localhost
-
-# Check firewall
-sudo ufw allow 8012
-```
-
-#### 5. Labeled Video Not Generated
-
-**Symptom:** No labeled video in results
-
-**Solutions:**
-```bash
-# Check temp directory permissions
-ls -la $TEMP_DIR
-
-# Check disk space
-df -h $TEMP_DIR
-
-# Check FFmpeg installation
-ffmpeg -codecs | grep h264
-```
-
-#### 6. Slow Processing
-
-**Symptom:** Videos take too long to process
-
-**Solutions:**
-```bash
-# Reduce sampling rate
-export DEFAULT_SAMPLING_FPS=0.5
-
-# Use smaller models
-export WHISPER_MODEL_ID=openai/whisper-tiny
-export VIOLENCE_MODEL_ID=facebook/timesformer-base-finetuned-k400
-
-# Enable GPU (if available)
-# See GPU Acceleration section
-
-# Reduce OCR frequency
-export OCR_INTERVAL_SEC=5.0
-```
-
-### Debug Mode
-
-Enable detailed logging:
+### Logs
 
 ```bash
-# Set log level
-export LOG_LEVEL=DEBUG
+# All logs
+docker-compose -f docker/docker-compose.yml logs
 
-# Run with debug output
-uvicorn app.main:app --reload --log-level debug
-```
+# Follow judex
+docker-compose -f docker/docker-compose.yml logs -f judex
 
-### Testing Installation
-
-Run the test suite to verify everything is working:
-
-```bash
-# Install test dependencies
-pip install -r tests/requirements-test.txt
-
-# Run all tests
-pytest tests/ -v
-
-# Run specific tests
-pytest tests/test_api_contract.py -v
-pytest tests/test_policy_fusion.py -v
-pytest tests/test_graph_smoke.py -v
-
-# Run with coverage
-pytest tests/ --cov=app --cov-report=html
-```
-
-### Getting Help
-
-If you encounter issues:
-
-1. Check logs: `docker-compose logs safevid`
-2. Verify requirements: Review [System Requirements](#system-requirements)
-3. Test health endpoint: `curl http://localhost:8012/v1/health`
-4. Check GitHub issues: Search for similar problems
-5. Open new issue: Include logs and system info
-
-### System Information
-
-Collect system info for bug reports:
-
-```bash
-# Docker info
-docker version
-docker-compose version
-
-# System info
-uname -a
-python --version
-ffmpeg -version
-
-# Disk space
-df -h
-
-# Memory
-free -h
-
-# GPU (if applicable)
-nvidia-smi
+# Export to file
+docker-compose -f docker/docker-compose.yml logs judex > judex.log
 ```
 
 ---
 
-## Next Steps
+## Migration from SafeVid
 
-- Read the [API Documentation](API.md)
-- Explore the [Architecture Guide](ARCHITECTURE.md)
-- Review [Usage Examples](../examples/)
-- Check the [Main README](../README.md)
+If upgrading from an older SafeVid installation:
+
+### 1. Update Database
+
+```bash
+# Create new database
+createdb judex
+
+# If migrating data from safevid
+pg_dump safevid | psql judex
+```
+
+### 2. Update MinIO
+
+```bash
+# Update credentials (MinIO console or mc)
+mc admin user add local judex judex123
+
+# Create new bucket
+mc mb local/judex
+```
+
+### 3. Update Configuration
+
+Replace all occurrences of `safevid` with `judex` in:
+- Environment variables
+- Docker compose files
+- Application configuration
+
+### 4. Rebuild
+
+```bash
+docker-compose -f docker/docker-compose.yml down -v
+docker-compose -f docker/docker-compose.yml up -d --build
+```
 
 ---
 
-For production deployments or enterprise support, please contact the maintainers.
+**For API documentation, see [API.md](API.md). For architecture details, see [ARCHITECTURE.md](ARCHITECTURE.md).**

@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# SafeVid Evaluation API - cURL Examples
+# Judex Evaluation API - cURL Examples
 #
 # This script demonstrates how to use the production-ready /v1/evaluate endpoint
 # using simple cURL commands.
@@ -9,7 +9,7 @@
 API_URL="http://localhost:8012/v1/evaluate"
 
 echo "======================================"
-echo "SafeVid Evaluation API - cURL Examples"
+echo "Judex Evaluation API - cURL Examples"
 echo "======================================"
 echo ""
 

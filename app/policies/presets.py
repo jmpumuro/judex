@@ -1,7 +1,7 @@
 """
 Evaluation presets - pre-configured EvaluationSpecs for common use cases.
 
-The child_safety preset provides backward compatibility with the original SafeVid API.
+The child_safety preset provides backward compatibility with the original Judex API.
 """
 from typing import Dict, Optional
 from app.evaluation.spec import (
@@ -27,7 +27,7 @@ class PresetNotFoundError(Exception):
 
 
 # ===== CHILD SAFETY PRESET =====
-# This provides backward compatibility with the original SafeVid API
+# This provides backward compatibility with the original Judex API
 
 CHILD_SAFETY_CRITERIA = [
     CriterionSpec(

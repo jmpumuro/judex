@@ -1,4 +1,4 @@
-# SafeVid - Child Safety Video Analysis Service
+# Judex - Video Evaluation Framework
 FROM python:3.11-slim
 
 # Set working directory
@@ -19,10 +19,10 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     HF_HOME=/models/hf \
     TRANSFORMERS_CACHE=/models/hf/transformers \
-    TEMP_DIR=/tmp/safevid
+    TEMP_DIR=/tmp/judex
 
 # Create directories
-RUN mkdir -p /models/hf /models/hf/transformers /tmp/safevid
+RUN mkdir -p /models/hf /models/hf/transformers /tmp/judex
 
 # Copy requirements first (for caching)
 COPY requirements.txt .

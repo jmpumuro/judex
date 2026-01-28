@@ -1,6 +1,6 @@
-# SafeVid Documentation
+# Judex Documentation
 
-Complete documentation for the SafeVid child safety video analysis service.
+Complete documentation for the Judex video evaluation framework.
 
 ---
 
@@ -25,12 +25,18 @@ For a general overview, see the main [README.md](../README.md) in the project ro
 # Clone and start
 git clone <repository-url>
 cd safeVid
+
+# Start PostgreSQL (if not running)
+createdb judex
+
+# Start services
 docker-compose -f docker/docker-compose.yml up -d
 
 # Access services
-# UI:  http://localhost:8080
+# UI:  http://localhost:5173  (React frontend)
 # API: http://localhost:8012
 # Docs: http://localhost:8012/docs
+# MinIO Console: http://localhost:9001
 ```
 
 ### API Quick Start
@@ -39,14 +45,20 @@ docker-compose -f docker/docker-compose.yml up -d
 # Health check
 curl http://localhost:8012/v1/health
 
-# Evaluate video (production endpoint)
+# Evaluate video with default criteria
 curl -X POST http://localhost:8012/v1/evaluate \
   -F "video=@video.mp4"
 
-# Batch processing
-curl -X POST http://localhost:8012/v1/evaluate/batch \
-  -F "files=@video1.mp4" \
-  -F "files=@video2.mp4"
+# Evaluate with specific preset
+curl -X POST http://localhost:8012/v1/evaluate \
+  -F "video=@video.mp4" \
+  -F "preset_id=child_safety"
+
+# List evaluations
+curl http://localhost:8012/v1/evaluations
+
+# Get evaluation status
+curl http://localhost:8012/v1/evaluations/{evaluation_id}
 ```
 
 ---
@@ -69,55 +81,58 @@ Start with [API.md](API.md) for API reference, then check the `/examples` folder
 
 ## 🎯 Key Features
 
-### **Production API**
-- Simple `/v1/evaluate` endpoint
+### **Unified Evaluation API**
+- Single `/v1/evaluate` endpoint for all use cases
 - Upload file or provide URL
-- Complete verdict with evidence
-- Configurable safety policies
+- Configurable evaluation criteria (presets or custom YAML/JSON)
+- Real-time progress via SSE
 
-### **Batch Processing**
-- Process multiple videos simultaneously
-- Real-time progress updates via SSE
-- Checkpoint/resume support
-- Persistent result storage
+### **Generic Criteria Framework**
+- Define custom evaluation criteria
+- Configure detectors, fusion strategies, and thresholds
+- Built-in presets: `child_safety`, `content_moderation`, `violence_detection`
+
+### **Pluggable Pipeline**
+- StagePlugin architecture for extensibility
+- Built-in stages: yolo26, yoloworld, violence, whisper, ocr, text_moderation
+- Stable LangGraph with dynamic stage execution
+
+### **Multi-Modal Analysis**
+- **Vision**: YOLO26, YOLO-World (object detection)
+- **Violence**: X-CLIP (16-frame temporal analysis)
+- **Audio**: Whisper ASR (transcription)
+- **Text**: PardonMyAI (profanity), BART-NLI (context moderation)
+- **OCR**: Tesseract (text extraction from frames)
 
 ### **Live Feed Analysis**
 - Real-time camera feed processing
 - YOLOE for fast object detection
 - Event-based violation tracking
-- WebRTC and RTSP support
-
-### **Multi-Modal Analysis**
-- **Vision**: YOLO26, YOLOE, YOLO-World
-- **Violence**: VideoMAE (16-frame clips)
-- **Audio**: Whisper ASR
-- **Text**: PardonMyAI (profanity), BART (context)
-- **OCR**: Tesseract
-
-### **Safety Criteria**
-- Violence (fights, weapons, aggressive behavior)
-- Profanity (inappropriate language)
-- Sexual Content (adult themes)
-- Drugs (paraphernalia, substance use)
-- Hate Speech (discrimination, harassment)
 
 ---
 
 ## 🏗️ System Architecture
 
-### **Pipeline Stages** (Batch)
+### **Pipeline Stages** (Stable LangGraph)
 
-1. **Ingest** - Normalize video (fps, resolution, audio)
-2. **Segment** - VideoMAE-optimized frame sampling
-3. **YOLO26** - Object detection at 640px
-4. **YOLO-World** - Open-vocabulary detection
-5. **Violence** - VideoMAE temporal analysis
-6. **Audio ASR** - Whisper transcription (30s chunks)
-7. **OCR** - Tesseract text extraction
-8. **Moderation** - Text analysis (profanity, context)
-9. **Policy Fusion** - Multi-signal scoring
-10. **LLM Report** - GPT-4o-mini summary
-11. **Finalize** - Result packaging
+```
+ingest_video → segment_video → run_pipeline → fuse_policy → llm_report
+                                    │
+                              PipelineRunner
+                            (Dynamic Stages)
+                                    │
+                    ┌───────────────┼───────────────┐
+                    │               │               │
+                 yolo26        yoloworld      violence
+                    │               │               │
+                 whisper          ocr       text_moderation
+```
+
+1. **ingest_video** - Validate, normalize to 720p@30fps, upload to MinIO
+2. **segment_video** - Extract keyframes (1fps), generate thumbnails
+3. **run_pipeline** - Execute enabled detectors via PipelineRunner
+4. **fuse_policy** - Compute criterion scores, determine verdict
+5. **llm_report** - Optional AI-generated summary
 
 ### **Live Feed Pipeline**
 
@@ -135,31 +150,41 @@ Start with [API.md](API.md) for API reference, then check the `/examples` folder
 - **SAFE** - Content is safe for all audiences
 - **CAUTION** - Minor concerns, review recommended
 - **UNSAFE** - Violates safety policies
-- **NEEDS_REVIEW** - Ambiguous, requires manual review
 
-### **Policy Configuration**
-Customize safety thresholds for different use cases:
-- **Strict** - Lower thresholds (children's content)
-- **Balanced** - Default thresholds (general use)
-- **Lenient** - Higher thresholds (news/documentary)
-
-### **Server-Side Checkpoints**
-Automatic state persistence allows resuming interrupted processing without starting from scratch.
+### **Criteria Configuration**
+Define evaluation criteria in YAML or JSON:
+```yaml
+name: my_criteria
+version: "1.0"
+criteria:
+  - id: violence
+    label: Violence Detection
+    weight: 1.0
+    threshold: 0.7
+fusion:
+  strategy: weighted_average
+verdict:
+  strategy: threshold
+```
 
 ### **SSE (Server-Sent Events)**
-One-way real-time progress updates from server to client, simpler and more reliable than WebSockets.
+One-way real-time progress updates from server to client:
+```bash
+curl -N http://localhost:8012/v1/evaluations/{id}/events
+```
 
 ---
 
 ## 🛠️ Technical Stack
 
 - **Backend**: FastAPI (Python 3.11)
-- **Pipeline**: LangGraph (state machines)
+- **Pipeline**: LangGraph (stable graph with dynamic execution)
 - **Models**: HuggingFace Transformers, Ultralytics YOLO
-- **Frontend**: HTML/CSS/JavaScript
+- **Frontend**: React 18, TypeScript, Tailwind CSS
+- **Database**: PostgreSQL (metadata, results, evidence)
+- **Object Storage**: MinIO (videos, frames, thumbnails)
+- **Real-time**: Server-Sent Events (SSE)
 - **Infrastructure**: Docker, Docker Compose
-- **Storage**: File-based (JSON + video files)
-- **Real-time**: SSE, WebSocket
 
 ---
 
@@ -170,6 +195,7 @@ One-way real-time progress updates from server to client, simpler and more relia
 - 4 CPU cores
 - 20GB storage
 - Docker + Docker Compose
+- PostgreSQL 14+
 
 ### Recommended
 - 16GB RAM
@@ -190,12 +216,11 @@ One-way real-time progress updates from server to client, simpler and more relia
 
 See [QUICKREF.md](QUICKREF.md) for detailed examples:
 
-- Uploading and processing videos
-- Starting live feed analysis
-- Viewing and managing results
-- Configuring safety policies
-- Managing checkpoints
-- Importing from storage/database/URLs
+- Evaluating videos with different criteria
+- Creating custom evaluation presets
+- Viewing evaluation results and artifacts
+- Managing the pipeline stages
+- Monitoring with SSE
 
 ---
 
@@ -205,7 +230,7 @@ See [QUICKREF.md](QUICKREF.md) for detailed examples:
 - **LangGraph**: https://github.com/langchain-ai/langgraph
 - **Ultralytics YOLO**: https://docs.ultralytics.com/
 - **OpenAI Whisper**: https://github.com/openai/whisper
-- **Tesseract OCR**: https://github.com/tesseract-ocr/tesseract
+- **MinIO**: https://min.io/docs/
 
 ---
 

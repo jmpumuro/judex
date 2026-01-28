@@ -45,7 +45,7 @@ Visit **http://localhost:5175/** and you'll see:
 ┌─────────────────────────────────────────────────────────────┐
 │ [Sidebar]              [Main Content]                       │
 │                                                              │
-│  SafeVid              Pipeline                [+ Add Videos]│
+│  Judex              Pipeline                [+ Add Videos]│
 │  v1.0.0               Upload and process videos             │
 │  ─────────            ───────────────────────────────────   │
 │  ► Pipeline           │ VIDEO QUEUE (0)  │                 │

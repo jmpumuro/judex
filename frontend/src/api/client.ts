@@ -19,6 +19,7 @@ import type {
   Artifact,
   StageOutput,
   Health,
+  FramesResponse,
 } from '@/types/api'
 
 // API base URL - in dev this goes through Vite proxy, in prod it's the same origin
@@ -145,17 +146,63 @@ export const evaluations = {
   },
   
   /**
-   * Get direct URL for labeled video.
+   * Get direct URL for labeled video (streams content through API).
    */
   getLabeledVideoUrl: (evaluationId: string, itemId: string): string => {
-    return `${API_BASE}/v1/evaluations/${evaluationId}/artifacts/labeled_video?item_id=${itemId}`
+    return `${API_BASE}/v1/evaluations/${evaluationId}/artifacts/labeled_video?item_id=${itemId}&stream=true`
   },
   
   /**
-   * Get direct URL for uploaded video.
+   * Get direct URL for uploaded video (streams content through API).
    */
   getUploadedVideoUrl: (evaluationId: string, itemId: string): string => {
-    return `${API_BASE}/v1/evaluations/${evaluationId}/artifacts/uploaded_video?item_id=${itemId}`
+    return `${API_BASE}/v1/evaluations/${evaluationId}/artifacts/uploaded_video?item_id=${itemId}&stream=true`
+  },
+  
+  /**
+   * Get processed frames (keyframes extracted during segmentation).
+   * Supports pagination for long videos.
+   * 
+   * @param evaluationId - Evaluation ID
+   * @param itemId - Item ID (required for multi-item evaluations)
+   * @param page - Page number (1-indexed)
+   * @param pageSize - Items per page (max 200)
+   * @param thumbnails - If true, returns thumbnail URLs (default); if false, full-size frames
+   */
+  getFrames: async (
+    evaluationId: string, 
+    itemId?: string, 
+    page = 1, 
+    pageSize = 50,
+    thumbnails = true
+  ): Promise<FramesResponse> => {
+    const { data } = await api.get<FramesResponse>(`/evaluations/${evaluationId}/frames`, {
+      params: { 
+        item_id: itemId,
+        page,
+        page_size: pageSize,
+        thumbnails
+      }
+    })
+    return data
+  },
+  
+  /**
+   * Get URL for a full-size frame image.
+   */
+  getFrameUrl: (evaluationId: string, filename: string, itemId: string): string => {
+    // Convert thumbnail filename to frame filename if needed
+    const frameFilename = filename.replace(/^thumb_/, 'frame_')
+    return `${API_BASE}/v1/evaluations/${evaluationId}/frames/${frameFilename}?item_id=${itemId}&stream=true`
+  },
+  
+  /**
+   * Get URL for a thumbnail image (small, for filmstrip display).
+   */
+  getThumbnailUrl: (evaluationId: string, filename: string, itemId: string): string => {
+    // Convert frame filename to thumbnail filename if needed
+    const thumbFilename = filename.replace(/^frame_/, 'thumb_')
+    return `${API_BASE}/v1/evaluations/${evaluationId}/thumbnails/${thumbFilename}?item_id=${itemId}&stream=true`
   },
 }
 

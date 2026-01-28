@@ -1,4 +1,4 @@
-import { FC, useState, useEffect, useRef, useCallback } from 'react'
+import { FC, useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { 
   Upload, Plus, Video, Play, Trash2,
   RotateCcw, Loader2, Link, Database, Cloud,
@@ -8,6 +8,7 @@ import { useVideoStore, QueueVideo, VideoStatus } from '@/store/videoStore'
 import { useSettingsStore } from '@/store/settingsStore'
 import { evaluationApi, stageApi, createSSEConnection, api } from '@/api/endpoints'
 import { evaluations as evaluationsApi } from '@/api'
+import { ProcessedFrames } from '@/components/pipeline/ProcessedFrames'
 import toast from 'react-hot-toast'
 
 interface CriteriaPreset {
@@ -533,21 +534,23 @@ const Pipeline: FC = () => {
   const [showUploadModal, setShowUploadModal] = useState(false)
   const [uploadSource, setUploadSource] = useState<'local' | 'url' | 'storage' | 'database'>('local')
   const [urlInput, setUrlInput] = useState('')
-  const [videoType, setVideoType] = useState<'labeled' | 'original'>('labeled')
+  const [videoType, setVideoType] = useState<'labeled' | 'original'>('original')
   const [selectedStage, setSelectedStage] = useState<string | null>(null)
   const [stageOutput, setStageOutput] = useState<any>(null)
   const [stageLoading, setStageLoading] = useState(false)
   const [completedStages, setCompletedStages] = useState<string[]>([])
   const [videoError, setVideoError] = useState(false)
+  const [labeledVideoError, setLabeledVideoError] = useState(false)
   const [presets, setPresets] = useState<CriteriaPreset[]>([])
   const [customCriteria, setCustomCriteria] = useState<CriteriaPreset[]>([])
   const [selectedPreset, setSelectedPreset] = useState<string>('child_safety')
   const [showPresetDropdown, setShowPresetDropdown] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const sseConnectionsRef = useRef<Map<string, EventSource>>(new Map())
+  const dataLoadedRef = useRef(false)
 
   // LocalStorage cache helpers for stage outputs
-  const STAGE_CACHE_KEY = 'safevid_stage_outputs'
+  const STAGE_CACHE_KEY = 'judex_stage_outputs'
   const STAGE_CACHE_EXPIRY = 24 * 60 * 60 * 1000 // 24 hours
 
   const getCachedStageOutput = (videoId: string, stageName: string): any | null => {
@@ -585,6 +588,10 @@ const Pipeline: FC = () => {
 
   // Load saved results, checkpoints, and criteria presets on mount
   useEffect(() => {
+    // Prevent double-loading in React StrictMode
+    if (dataLoadedRef.current) return
+    dataLoadedRef.current = true
+    
     const loadData = async () => {
       try {
         // Load criteria presets (built-in and custom)
@@ -598,9 +605,20 @@ const Pipeline: FC = () => {
         // Load recent evaluations and add completed/processing ones to the queue
         const { evaluations } = await evaluationApi.list(20)
         
+        // Get current queue state to check for existing items
+        const currentQueue = useVideoStore.getState().queue
+        const existingItemIds = new Set(currentQueue.map(v => v.itemId).filter(Boolean))
+        const existingEvalIds = new Set(currentQueue.map(v => v.evaluationId).filter(Boolean))
+        
+        // Collect all videos to add (batch add to avoid multiple re-renders)
+        const videosToAdd: Omit<QueueVideo, 'id' | 'uploadedAt'>[] = []
+        
         // Fetch full details for each evaluation to get items with results
         for (const evalSummary of evaluations) {
           if (evalSummary.status !== 'completed' && evalSummary.status !== 'processing') continue
+          
+          // Skip if we already have this evaluation in queue
+          if (existingEvalIds.has(evalSummary.id)) continue
           
           try {
             const evaluation = await evaluationApi.get(evalSummary.id)
@@ -608,13 +626,9 @@ const Pipeline: FC = () => {
             
             evaluation.items.forEach((item: any) => {
               // Skip if already in queue
-              const exists = queue.find(v => 
-                v.itemId === item.id || 
-                (v.evaluationId === evaluation.id && v.filename === item.filename)
-              )
-              if (exists) return
+              if (existingItemIds.has(item.id)) return
               
-              addVideos([{
+              videosToAdd.push({
                 filename: item.filename,
                 file: null,
                 status: item.status || evaluation.status,
@@ -625,11 +639,16 @@ const Pipeline: FC = () => {
                 result: item.result,
                 evaluationId: evaluation.id,
                 itemId: item.id,
-              }])
+              })
             })
           } catch (e) {
             console.warn(`Failed to load evaluation ${evalSummary.id}:`, e)
           }
+        }
+        
+        // Add all videos at once
+        if (videosToAdd.length > 0) {
+          addVideos(videosToAdd)
         }
       } catch (error) {
         console.error('Error loading data:', error)
@@ -870,6 +889,39 @@ const Pipeline: FC = () => {
 
   const selectedVideo = selectedVideoId ? getVideoById(selectedVideoId) : null
   
+  // Memoize video URLs to prevent flickering on re-renders
+  const videoUrls = useMemo(() => {
+    if (!selectedVideo) return { original: null, labeled: null }
+    
+    const evaluationId = selectedVideo.evaluationId
+    const itemId = selectedVideo.itemId
+    
+    // Original video: local file blob URL or backend URL
+    let originalUrl: string | null = null
+    if (selectedVideo.file) {
+      originalUrl = URL.createObjectURL(selectedVideo.file)
+    } else if (evaluationId && itemId) {
+      originalUrl = evaluationsApi.getUploadedVideoUrl(evaluationId, itemId)
+    }
+    
+    // Labeled video: always from backend
+    let labeledUrl: string | null = null
+    if (evaluationId && itemId) {
+      labeledUrl = evaluationsApi.getLabeledVideoUrl(evaluationId, itemId)
+    }
+    
+    return { original: originalUrl, labeled: labeledUrl }
+  }, [selectedVideo?.id, selectedVideo?.file, selectedVideo?.evaluationId, selectedVideo?.itemId])
+  
+  // Cleanup blob URL on unmount or video change
+  useEffect(() => {
+    return () => {
+      if (videoUrls.original?.startsWith('blob:')) {
+        URL.revokeObjectURL(videoUrls.original)
+      }
+    }
+  }, [videoUrls.original])
+  
   const getStageStatus = (stageId: string, video: QueueVideo | null) => {
     if (!video) return 'pending'
     if (video.status === 'completed') return 'completed'
@@ -1061,6 +1113,41 @@ const Pipeline: FC = () => {
     const currentIndex = PIPELINE_STAGES.findIndex(s => s.id === video.currentStage)
     return stageIndex < currentIndex
   }
+  
+  // Check if a specific stage has completed (for progressive content display)
+  const isStageComplete = (stageId: string, video: QueueVideo | null): boolean => {
+    if (!video) return false
+    if (video.status === 'completed') return true
+    if (video.status !== 'processing') return false
+    
+    const stageIndex = PIPELINE_STAGES.findIndex(s => s.id === stageId)
+    const currentIndex = PIPELINE_STAGES.findIndex(s => s.id === video.currentStage)
+    return stageIndex < currentIndex
+  }
+  
+  // Video is available after ingest completes
+  const isVideoAvailable = (video: QueueVideo | null): boolean => {
+    if (!video) return false
+    if (video.status === 'completed') return true
+    // Video is uploaded during ingest, available after ingest completes
+    return isStageComplete('ingest_video', video) || Boolean(video.file)
+  }
+  
+  // Frames are available after segment completes
+  const isFramesAvailable = (video: QueueVideo | null): boolean => {
+    if (!video) return false
+    if (video.status === 'completed') return true
+    // Frames are extracted during segment, available after segment completes
+    return isStageComplete('segment_video', video)
+  }
+  
+  // Labeled video is available after YOLO26 vision stage completes (annotations are drawn)
+  const isLabeledVideoAvailable = (video: QueueVideo | null): boolean => {
+    if (!video) return false
+    if (video.status === 'completed') return true
+    // Labeled video is generated during yolo26_vision stage
+    return isStageComplete('yolo26_vision', video)
+  }
 
   // Note: Video URLs are now computed inline in the JSX to properly handle
   // local file vs backend URL fallback (matching index.html behavior)
@@ -1155,7 +1242,7 @@ const Pipeline: FC = () => {
             ) : (
               <div className="p-1">
                 {queue.map(video => (
-                  <div key={video.id} onClick={() => { selectVideo(video.id); setSelectedStage(null); setStageOutput(null); setVideoError(false) }}
+                  <div key={video.id} onClick={() => { selectVideo(video.id); setSelectedStage(null); setStageOutput(null); setVideoError(false); setLabeledVideoError(false) }}
                     className={`p-2 cursor-pointer text-xs flex items-center justify-between group ${selectedVideoId === video.id ? 'bg-gray-900 border-l-2 border-white' : 'hover:bg-gray-900/50 border-l-2 border-transparent'}`}>
                     <span className="truncate flex-1 text-gray-400" title={video.filename}>{video.filename}</span>
                     <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100">
@@ -1204,47 +1291,50 @@ const Pipeline: FC = () => {
 
               {/* Content */}
               <div className="flex-1 grid grid-cols-2 gap-2 p-2 overflow-hidden">
-                {/* Video */}
+                {/* Video + Frames Container */}
                 <div className="flex flex-col bg-gray-900 border border-gray-800 overflow-hidden">
+                  {/* Video Player Header */}
                   <div className="p-1.5 border-b border-gray-800 flex items-center justify-between">
-                    <span className="text-[9px] text-gray-500 uppercase">{videoType === 'labeled' ? 'Labeled' : 'Original'}</span>
-                    {selectedVideo.status === 'completed' && (
+                    <span className="text-[9px] text-gray-500 uppercase">
+                      {videoType === 'labeled' ? 'Labeled' : 'Original'}
+                    </span>
+                    {/* Show toggle when video is available - labeled may still be loading */}
+                    {isVideoAvailable(selectedVideo) && (
                       <div className="flex text-[9px]">
-                        <button onClick={() => { setVideoType('labeled'); setVideoError(false) }} className={`px-1.5 py-0.5 ${videoType === 'labeled' ? 'bg-white text-black' : 'text-gray-600'}`}>LAB</button>
-                        <button onClick={() => { setVideoType('original'); setVideoError(false) }} className={`px-1.5 py-0.5 ${videoType === 'original' ? 'bg-white text-black' : 'text-gray-600'}`}>ORI</button>
+                        <button onClick={() => { setVideoType('labeled'); setVideoError(false); setLabeledVideoError(false) }} className={`px-1.5 py-0.5 ${videoType === 'labeled' ? 'bg-white text-black' : 'text-gray-600'}`}>LAB</button>
+                        <button onClick={() => { setVideoType('original'); setVideoError(false); setLabeledVideoError(false) }} className={`px-1.5 py-0.5 ${videoType === 'original' ? 'bg-white text-black' : 'text-gray-600'}`}>ORI</button>
                       </div>
                     )}
                   </div>
-                  <div className="flex-1 bg-black flex items-center justify-center">
-                    {selectedVideo.status === 'completed' ? (
-                      videoError ? (
+                  
+                  {/* Video Player - Show as soon as video is available (after ingest) */}
+                  <div className="flex-shrink-0 bg-black flex items-center justify-center" style={{ minHeight: '180px', maxHeight: '280px' }}>
+                    {isVideoAvailable(selectedVideo) ? (
+                      // Original video error
+                      videoType === 'original' && videoError ? (
                         <div className="text-center text-gray-600 p-4">
                           <Video size={24} className="mx-auto mb-2 opacity-50" />
                           <p className="text-xs">Video not available</p>
-                          {videoType === 'labeled' && (
-                            <button onClick={() => { setVideoType('original'); setVideoError(false) }} className="text-blue-400 text-xs mt-2 underline">Try original</button>
-                          )}
+                        </div>
+                      ) : 
+                      // Labeled video error or not available
+                      videoType === 'labeled' && (labeledVideoError || !isLabeledVideoAvailable(selectedVideo)) ? (
+                        <div className="text-center text-gray-600 p-4">
+                          <Video size={24} className="mx-auto mb-2 opacity-50" />
+                          <p className="text-xs">
+                            {labeledVideoError ? 'Video not available' : 'Generating labeled video...'}
+                          </p>
+                          <button 
+                            onClick={() => { setVideoType('original'); setLabeledVideoError(false) }} 
+                            className="text-blue-400 text-xs mt-2 underline"
+                          >
+                            View original
+                          </button>
                         </div>
                       ) : (
                         (() => {
-                          // Use evaluation-based video URLs
-                          const evaluationId = selectedVideo.evaluationId
-                          const itemId = selectedVideo.itemId
-                          const getVideoSrc = () => {
-                            if (videoType === 'original') {
-                              // For original video: local file first, then backend
-                              if (selectedVideo.file) return URL.createObjectURL(selectedVideo.file)
-                              return evaluationId && itemId 
-                                ? evaluationsApi.getUploadedVideoUrl(evaluationId, itemId) 
-                                : null
-                            } else {
-                              // For labeled video: always from backend
-                              return evaluationId && itemId 
-                                ? evaluationsApi.getLabeledVideoUrl(evaluationId, itemId) 
-                                : null
-                            }
-                          }
-                          const videoSrc = getVideoSrc()
+                          // Use memoized video URLs to prevent flickering
+                          const videoSrc = videoType === 'original' ? videoUrls.original : videoUrls.labeled
                           
                           if (!videoSrc) {
                             return (
@@ -1259,12 +1349,12 @@ const Pipeline: FC = () => {
                             <video 
                               controls 
                               className="max-w-full max-h-full" 
-                              key={`${selectedVideo.id}-${videoType}`}
+                              key={`video-${selectedVideo.itemId || selectedVideo.id}-${videoType}`}
                               src={videoSrc}
                               onError={() => {
                                 if (videoType === 'labeled') {
-                                  console.log('Labeled video failed, trying original')
-                                  setVideoType('original')
+                                  console.log('Labeled video failed to load')
+                                  setLabeledVideoError(true)
                                 } else {
                                   setVideoError(true)
                                 }
@@ -1274,9 +1364,33 @@ const Pipeline: FC = () => {
                         })()
                       )
                     ) : selectedVideo.status === 'processing' ? (
-                      <div className="text-center"><Loader2 size={24} className="mx-auto mb-1 animate-spin text-gray-700" /><p className="text-[10px] text-gray-600">{selectedVideo.progress}%</p></div>
+                      <div className="text-center">
+                        <Loader2 size={24} className="mx-auto mb-1 animate-spin text-gray-700" />
+                        <p className="text-[10px] text-gray-600">
+                          {selectedVideo.currentStage === 'ingest_video' ? 'Uploading video...' : `${selectedVideo.progress}%`}
+                        </p>
+                      </div>
                     ) : <Video size={24} className="text-gray-800" />}
                   </div>
+                  
+                  {/* Processed Frames Gallery - Show as soon as segmentation completes */}
+                  {isFramesAvailable(selectedVideo) && selectedVideo.evaluationId && selectedVideo.itemId && (
+                    <div className="flex-1 overflow-y-auto border-t border-gray-800 p-1 bg-black">
+                      <ProcessedFrames
+                        evaluationId={selectedVideo.evaluationId}
+                        itemId={selectedVideo.itemId}
+                      />
+                    </div>
+                  )}
+                  {/* Show loading indicator during segmentation */}
+                  {selectedVideo.status === 'processing' && selectedVideo.currentStage === 'segment_video' && (
+                    <div className="flex-shrink-0 border-t border-gray-800 p-2 bg-black">
+                      <div className="flex items-center gap-2 text-gray-500 text-xs">
+                        <Loader2 size={12} className="animate-spin" />
+                        <span>Extracting frames...</span>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Stage Output */}

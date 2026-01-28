@@ -34,7 +34,7 @@ The Tailwind styles are now properly configured and working!
 When you visit **http://localhost:5174/**, you'll see:
 
 1. **Sidebar Navigation** (left side)
-   - SafeVid logo/title
+   - Judex logo/title
    - Navigation links for all pages
    - Current page highlighted in indigo/primary color
 
@@ -227,7 +227,7 @@ The React frontend is now fully functional with:
 
 ```
 ┌────────────────────────────────────────────────────────────┐
-│ 🔵 SafeVid          Pipeline  Live Feed  Events  Settings │
+│ 🔵 Judex          Pipeline  Live Feed  Events  Settings │
 │                                                            │
 │    Pipeline         Pipeline                 [+ Add Videos]│
 │  • Live Feed        Upload and process videos              │

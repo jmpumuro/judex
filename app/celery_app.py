@@ -1,5 +1,5 @@
 """
-Celery application configuration for SafeVid task queue.
+Celery application configuration for Judex task queue.
 
 Provides sequential video processing to prevent OOM crashes.
 """
@@ -12,7 +12,7 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 # Create Celery app
 celery_app = Celery(
-    "safevid",
+    "judex",
     broker=REDIS_URL,
     backend=REDIS_URL,
     include=["app.tasks.video_tasks"]

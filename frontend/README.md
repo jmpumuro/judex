@@ -1,6 +1,6 @@
-# SafeVid React Frontend
+# Judex React Frontend
 
-Modern, scalable React frontend for SafeVid video analysis platform.
+Modern, scalable React frontend for Judex video analysis platform.
 
 ## 🏗️ Tech Stack
 

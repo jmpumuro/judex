@@ -1,5 +1,6 @@
 """
 YOLO26 vision detection node.
+Creates labeled video with bounding boxes and uploads to storage immediately.
 """
 from pathlib import Path
 from app.pipeline.state import PipelineState
@@ -8,6 +9,7 @@ from app.models import get_yolo26_detector
 from app.utils.hashing import generate_vision_id
 from app.utils.progress import send_progress, save_stage_output, format_stage_output
 from app.utils.ffmpeg import create_labeled_video
+from app.utils.storage import get_storage_service
 
 logger = get_logger("node.yolo26")
 
@@ -51,13 +53,14 @@ def run_yolo26_vision(state: PipelineState) -> PipelineState:
         signals = detector.get_safety_signals(all_detections)
         logger.info(f"Safety signals: weapons={signals['weapon_count']}, substances={signals['substance_count']}")
     
-    # Create labeled video with bounding boxes
+    # Create labeled video with bounding boxes and upload immediately
     if all_detections:
         try:
             send_progress(state.get("progress_callback"), "yolo26_vision", "Creating labeled video", 80)
             
             video_path = state["video_path"]
             work_dir = state["work_dir"]
+            video_id = state.get("video_id")
             fps = state.get("fps", 30.0)
             
             # Get violence segments if available (may not be available yet in pipeline order)
@@ -68,6 +71,18 @@ def run_yolo26_vision(state: PipelineState) -> PipelineState:
             
             state["labeled_video_path"] = labeled_video_path
             logger.info(f"Created labeled video: {labeled_video_path}")
+            
+            # Upload labeled video to MinIO immediately for early UI access
+            if video_id and Path(labeled_video_path).exists():
+                try:
+                    send_progress(state.get("progress_callback"), "yolo26_vision", "Uploading labeled video", 90)
+                    storage = get_storage_service()
+                    minio_path = storage.upload_labeled_video(labeled_video_path, video_id)
+                    state["labeled_video_path"] = minio_path  # Update to MinIO path
+                    logger.info(f"Uploaded labeled video to storage: {minio_path}")
+                except Exception as upload_err:
+                    logger.warning(f"Failed to upload labeled video to storage: {upload_err}")
+                    # Keep local path as fallback
             
         except Exception as e:
             logger.error(f"Failed to create labeled video: {e}")

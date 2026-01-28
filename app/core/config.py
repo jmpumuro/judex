@@ -1,5 +1,5 @@
 """
-Configuration management for SafeVid service.
+Configuration management for Judex service.
 """
 import os
 from typing import Dict, Any
@@ -10,8 +10,8 @@ class Settings(BaseSettings):
     """Application settings with environment variable support."""
     
     # API Settings
-    app_name: str = "SafeVid - Child Safety Video Analysis"
-    version: str = "1.0.0"
+    app_name: str = "Judex - Video Evaluation Framework"
+    version: str = "2.0.0"
     api_prefix: str = "/v1"
     
     # Model Settings
@@ -45,14 +45,14 @@ class Settings(BaseSettings):
     openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     
     # Database Settings
-    database_url: str = os.getenv("DATABASE_URL", "postgresql://docker:docker@localhost:5432/safevid")
+    database_url: str = os.getenv("DATABASE_URL", "postgresql://docker:docker@localhost:5432/judex")
     
     # MinIO Object Storage Settings
     minio_endpoint: str = os.getenv("MINIO_ENDPOINT", "localhost:9000")
     minio_external_endpoint: str = os.getenv("MINIO_EXTERNAL_ENDPOINT", "localhost:9000")  # For browser access
-    minio_access_key: str = os.getenv("MINIO_ACCESS_KEY", "safevid")
-    minio_secret_key: str = os.getenv("MINIO_SECRET_KEY", "safevid123")
-    minio_bucket: str = os.getenv("MINIO_BUCKET", "safevid")
+    minio_access_key: str = os.getenv("MINIO_ACCESS_KEY", "judex")
+    minio_secret_key: str = os.getenv("MINIO_SECRET_KEY", "judex123")
+    minio_bucket: str = os.getenv("MINIO_BUCKET", "judex")
     minio_secure: bool = os.getenv("MINIO_SECURE", "false").lower() == "true"
     
     # Video Processing Settings
@@ -62,10 +62,10 @@ class Settings(BaseSettings):
     ocr_interval_sec: float = float(os.getenv("OCR_INTERVAL_SEC", "2.0"))
     
     # Working Directory
-    temp_dir: str = os.getenv("TEMP_DIR", "/tmp/safevid")
+    temp_dir: str = os.getenv("TEMP_DIR", "/tmp/judex")
     
     # Persistent Data Directory
-    data_dir: str = os.getenv("DATA_DIR", "/data/safevid")
+    data_dir: str = os.getenv("DATA_DIR", "/data/judex")
     
     # Policy Thresholds
     threshold_unsafe_violence: float = 0.75

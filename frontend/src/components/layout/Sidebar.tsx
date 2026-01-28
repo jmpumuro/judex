@@ -16,7 +16,7 @@ const Sidebar: FC = () => {
       {/* Logo */}
       <div className="sidebar-brand">
         <span className="sidebar-brand-icon group-hover:hidden">◆</span>
-        <span className="sidebar-brand-text hidden group-hover:block">SAFEVID</span>
+        <span className="sidebar-brand-text hidden group-hover:block">JUDEX</span>
       </div>
 
       {/* Navigation */}
@@ -42,8 +42,8 @@ const Sidebar: FC = () => {
       <div className="px-4 py-4 border-t border-gray-800 text-xs text-gray-600">
         <div className="sidebar-brand-icon group-hover:hidden text-center">v1</div>
         <div className="hidden group-hover:block">
-          <p>SafeVid v1.0.0</p>
-          <p className="mt-1">AI-Powered Safety</p>
+          <p>Judex v2.0.0</p>
+          <p className="mt-1">Video Evaluation</p>
         </div>
       </div>
     </aside>

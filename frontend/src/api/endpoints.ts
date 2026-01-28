@@ -1,5 +1,5 @@
 /**
- * SafeVid API Client
+ * Judex API Client
  * 
  * Primary APIs:
  * - evaluationApi: POST /v1/evaluate, GET /v1/evaluations/*

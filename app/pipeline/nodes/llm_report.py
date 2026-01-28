@@ -94,7 +94,15 @@ def generate_llm_report(state: PipelineState) -> PipelineState:
 
 def _prepare_evidence_summary(state: PipelineState) -> Dict[str, Any]:
     """Prepare structured evidence summary for LLM."""
-    criterion_scores = state.get("criterion_scores", {})
+    # Extract scores from criteria_scores (new format) or criterion_scores (legacy)
+    criteria_scores = state.get("criteria_scores", {})
+    criterion_scores = {}
+    for crit_id, crit_data in criteria_scores.items():
+        if isinstance(crit_data, dict):
+            criterion_scores[crit_id] = crit_data.get("score", 0.0)
+        else:
+            criterion_scores[crit_id] = float(crit_data)
+    
     violations = state.get("violations", [])
     evidence = state.get("evidence", {})
     
@@ -165,7 +173,16 @@ def _generate_template_report(state: PipelineState) -> str:
     """Generate template report without LLM (AI-style format)."""
     verdict = state.get("verdict", "UNKNOWN")
     violations = state.get("violations", [])
-    criterion_scores = state.get("criterion_scores", {})
+    
+    # Extract scores from criteria_scores (new format)
+    criteria_scores = state.get("criteria_scores", {})
+    criterion_scores = {}
+    for crit_id, crit_data in criteria_scores.items():
+        if isinstance(crit_data, dict):
+            criterion_scores[crit_id] = crit_data.get("score", 0.0)
+        else:
+            criterion_scores[crit_id] = float(crit_data)
+    
     duration = state.get("duration", 0)
     
     report_lines = []

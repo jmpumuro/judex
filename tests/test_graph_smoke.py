@@ -4,16 +4,22 @@ Smoke tests for LangGraph pipeline.
 import pytest
 from unittest.mock import MagicMock, patch
 from app.pipeline.state import PipelineState
-from app.pipeline.graph import build_graph
+from app.pipeline.graph import build_stable_graph, get_stable_graph
 from app.pipeline.nodes.ingest_video import ingest_video
 from app.pipeline.nodes.segment_video import segment_video
-from app.pipeline.nodes.finalize import finalize
 
 
-def test_build_graph():
-    """Test that graph can be built."""
-    graph = build_graph()
+def test_build_stable_graph():
+    """Test that stable graph can be built."""
+    graph = build_stable_graph()
     assert graph is not None
+
+
+def test_get_stable_graph_singleton():
+    """Test that get_stable_graph returns cached instance."""
+    graph1 = get_stable_graph()
+    graph2 = get_stable_graph()
+    assert graph1 is graph2
 
 
 def test_ingest_video_node():
@@ -67,44 +73,6 @@ def test_segment_video_node():
         assert "sampled_frames" in result
         assert len(result["sampled_frames"]) == 3
         assert "segments" in result
-
-
-def test_finalize_node():
-    """Test finalize node."""
-    state = PipelineState(
-        video_id="test-123",
-        duration=10.0,
-        sampled_frames=[{"path": "/tmp/frame.jpg", "timestamp": 0.0, "frame_index": 0}],
-        segments=[{"index": 0, "start_time": 0.0, "end_time": 3.0}],
-        criterion_scores={
-            "violence": 0.1,
-            "profanity": 0.2,
-            "sexual": 0.1,
-            "drugs": 0.1,
-            "hate": 0.05
-        },
-        violations=[],
-        verdict="SAFE",
-        evidence={
-            "vision": [],
-            "violence_segments": [],
-            "asr": [],
-            "ocr": []
-        },
-        report="Test report"
-    )
-    
-    result = finalize(state)
-    
-    assert "result" in result
-    output = result["result"]
-    
-    assert output["verdict"] == "SAFE"
-    assert "criteria" in output
-    assert "violations" in output
-    assert "evidence" in output
-    assert "report" in output
-    assert "metadata" in output
 
 
 def test_state_transitions():

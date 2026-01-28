@@ -1,5 +1,5 @@
 """
-FastAPI routes for SafeVid service.
+FastAPI routes for Judex service.
 
 This module contains utility endpoints (health, models).
 Primary API is in evaluations.py and criteria_routes.py.

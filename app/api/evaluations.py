@@ -292,7 +292,7 @@ async def process_evaluation_item(
     criteria: EvaluationCriteria
 ) -> None:
     """Process a single evaluation item."""
-    from app.pipeline.generic_graph import run_generic_pipeline
+    from app.pipeline.graph import run_pipeline
     from app.api.sse import broadcast_progress
     
     logger.info(f"Processing item {item_id} for evaluation {evaluation_id}")
@@ -314,7 +314,7 @@ async def process_evaluation_item(
         )
     
     try:
-        result = await run_generic_pipeline(
+        result = await run_pipeline(
             video_path=video_path,
             criteria=criteria,
             video_id=item_id,
@@ -333,25 +333,26 @@ async def process_evaluation_item(
             report=result.get("report")
         )
         
-        # Upload labeled video to MinIO and update artifacts
+        # Update labeled video path in database
+        # Note: The labeled video is now uploaded during yolo26_vision stage for early access
         if result.get("labeled_video_path"):
-            local_labeled_path = result["labeled_video_path"]
-            if Path(local_labeled_path).exists():
+            labeled_path = result["labeled_video_path"]
+            storage = get_storage_service()
+            
+            # Check if already uploaded to MinIO (path starts with labeled/ prefix)
+            if labeled_path.startswith(storage.LABELED_PREFIX):
+                # Already in MinIO, just update the database
+                EvaluationRepository.update_item(item_id, labeled_video_path=labeled_path)
+                logger.info(f"Labeled video already in storage: {labeled_path}")
+            elif Path(labeled_path).exists():
+                # Local path - upload to MinIO (fallback for older code paths)
                 try:
-                    storage = get_storage_service()
-                    minio_path = storage.upload_labeled_video(local_labeled_path, item_id)
-                    EvaluationRepository.update_item(
-                        item_id,
-                        labeled_video_path=minio_path
-                    )
+                    minio_path = storage.upload_labeled_video(labeled_path, item_id)
+                    EvaluationRepository.update_item(item_id, labeled_video_path=minio_path)
                     logger.info(f"Uploaded labeled video to MinIO: {minio_path}")
                 except Exception as e:
                     logger.warning(f"Failed to upload labeled video to MinIO: {e}")
-                    # Still save the local path as fallback
-                    EvaluationRepository.update_item(
-                        item_id,
-                        labeled_video_path=local_labeled_path
-                    )
+                    EvaluationRepository.update_item(item_id, labeled_video_path=labeled_path)
         
         # Send completion event
         asyncio.create_task(broadcast_progress(
@@ -628,16 +629,18 @@ async def get_evaluation_stage(evaluation_id: str, stage_name: str, item_id: Opt
     return {"evaluation_id": evaluation_id, "stage": stage_name, "outputs": results}
 
 
-@router.get("/evaluations/{evaluation_id}/artifacts/{artifact_type}", response_model=ArtifactDTO)
+@router.get("/evaluations/{evaluation_id}/artifacts/{artifact_type}")
 async def get_evaluation_artifact(
     evaluation_id: str,
     artifact_type: str,
-    item_id: Optional[str] = None
+    item_id: Optional[str] = None,
+    stream: bool = Query(False, description="Stream content directly instead of returning URL")
 ):
     """
     Get evaluation artifacts (videos, thumbnails, reports).
     
-    Returns presigned URL or redirect to storage.
+    - If stream=false (default): Returns presigned URL metadata
+    - If stream=true: Streams the content directly (recommended for browsers)
     """
     evaluation = EvaluationRepository.get_with_items(evaluation_id)
     if not evaluation:
@@ -655,12 +658,16 @@ async def get_evaluation_artifact(
     
     # Get artifact path
     path = None
+    content_type = "application/octet-stream"
     if artifact_type == "labeled_video":
         path = item.labeled_video_path
+        content_type = "video/mp4"
     elif artifact_type == "uploaded_video":
         path = item.uploaded_video_path
+        content_type = "video/mp4"
     elif artifact_type == "thumbnail":
         path = item.thumbnail_path
+        content_type = "image/jpeg"
     elif artifact_type == "report" and item.result:
         return Response(
             content=item.result.report or "No report generated",
@@ -670,12 +677,234 @@ async def get_evaluation_artifact(
     if not path:
         raise HTTPException(404, f"Artifact {artifact_type} not found")
     
-    # Get presigned URL
+    storage = get_storage_service()
+    
+    # Stream content directly (recommended for browsers)
+    if stream:
+        try:
+            # Get content from MinIO and stream to client
+            content = storage.get_bytes(path)
+            return Response(
+                content=content,
+                media_type=content_type,
+                headers={
+                    "Content-Disposition": f'inline; filename="{artifact_type}_{item.id}.mp4"',
+                    "Cache-Control": "max-age=3600"
+                }
+            )
+        except Exception as e:
+            raise HTTPException(500, f"Failed to stream artifact: {e}")
+    
+    # Return URL metadata (for backward compatibility)
     try:
-        url = get_storage_service().get_presigned_url(path)
+        url = storage.get_presigned_url(path)
         return ArtifactDTO(url=url, artifact_type=artifact_type, item_id=item.id)
     except Exception as e:
         raise HTTPException(500, f"Failed to get artifact: {e}")
+
+
+@router.get("/evaluations/{evaluation_id}/frames")
+async def list_frames(
+    evaluation_id: str,
+    item_id: Optional[str] = None,
+    page: int = Query(1, ge=1, description="Page number (1-indexed)"),
+    page_size: int = Query(50, ge=1, le=200, description="Items per page"),
+    thumbnails: bool = Query(True, description="Return thumbnail URLs (faster for filmstrip)")
+):
+    """
+    List processed frames (keyframes extracted during segmentation).
+    
+    Industry standard pagination:
+    - page: 1-indexed page number
+    - page_size: max 200 items per page
+    - thumbnails: if true, returns small thumbnail URLs; if false, returns full-size frame URLs
+    
+    Returns paginated frame metadata with URLs for streaming.
+    """
+    evaluation = EvaluationRepository.get_with_items(evaluation_id)
+    if not evaluation:
+        raise HTTPException(404, f"Evaluation {evaluation_id} not found")
+    
+    # Find item
+    item: Optional[EvaluationItemDTO] = None
+    if item_id:
+        item = next((i for i in evaluation.items if i.id == item_id), None)
+    elif len(evaluation.items) == 1:
+        item = evaluation.items[0]
+    
+    if not item:
+        raise HTTPException(400, "item_id required for multi-item evaluations")
+    
+    storage = get_storage_service()
+    
+    # List frames or thumbnails from storage
+    try:
+        if thumbnails:
+            # Use thumbnails for filmstrip (faster, smaller)
+            frame_objects = storage.list_frame_thumbnails(item.id)
+            prefix = "thumb_"
+            url_type = "thumbnails"
+        else:
+            # Use full-size keyframes
+            frame_objects = storage.list_frames(item.id)
+            prefix = "frame_"
+            url_type = "frames"
+        
+        all_frames = []
+        for obj_path in frame_objects:
+            # Parse frame info from filename: frame_{index}_{timestamp_ms}.jpg or thumb_{index}_{timestamp_ms}.jpg
+            filename = Path(obj_path).stem
+            parts = filename.split('_')
+            
+            frame_index = int(parts[1]) if len(parts) > 1 else 0
+            timestamp_ms = int(parts[2]) if len(parts) > 2 else 0
+            timestamp = timestamp_ms / 1000.0
+            
+            all_frames.append({
+                "id": filename,
+                "index": frame_index,
+                "timestamp": timestamp,
+                "thumbnail_url": f"/v1/evaluations/{evaluation_id}/{url_type}/{filename}?item_id={item.id}&stream=true",
+                # Also provide full-size URL for click-to-expand
+                "full_url": f"/v1/evaluations/{evaluation_id}/frames/frame_{parts[1]}_{parts[2]}?item_id={item.id}&stream=true" if thumbnails else None,
+            })
+        
+        # Sort by index
+        all_frames.sort(key=lambda x: x["index"])
+        total = len(all_frames)
+        
+        # Paginate
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        paginated_frames = all_frames[start_idx:end_idx]
+        
+        return {
+            "evaluation_id": evaluation_id,
+            "item_id": item.id,
+            "frames": paginated_frames,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": (total + page_size - 1) // page_size if total > 0 else 1
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to list frames: {e}")
+        return {"evaluation_id": evaluation_id, "item_id": item.id, "frames": [], "total": 0, "page": page, "page_size": page_size, "total_pages": 1}
+
+
+@router.get("/evaluations/{evaluation_id}/frames/{filename}")
+async def get_frame(
+    evaluation_id: str,
+    filename: str,
+    item_id: Optional[str] = None,
+    stream: bool = Query(True, description="Stream content directly")
+):
+    """
+    Get a specific frame image.
+    
+    - stream=true: Returns the image content directly (default, recommended)
+    - stream=false: Returns presigned URL metadata
+    """
+    evaluation = EvaluationRepository.get_with_items(evaluation_id)
+    if not evaluation:
+        raise HTTPException(404, f"Evaluation {evaluation_id} not found")
+    
+    # Find item
+    item: Optional[EvaluationItemDTO] = None
+    if item_id:
+        item = next((i for i in evaluation.items if i.id == item_id), None)
+    elif len(evaluation.items) == 1:
+        item = evaluation.items[0]
+    
+    if not item:
+        raise HTTPException(400, "item_id required for multi-item evaluations")
+    
+    storage = get_storage_service()
+    
+    # Build object path
+    object_path = f"{storage.FRAMES_PREFIX}{item.id}/{filename}.jpg"
+    
+    if not storage.object_exists(object_path):
+        raise HTTPException(404, f"Frame not found: {filename}")
+    
+    if stream:
+        try:
+            content = storage.get_bytes(object_path)
+            return Response(
+                content=content,
+                media_type="image/jpeg",
+                headers={
+                    "Content-Disposition": f'inline; filename="{filename}.jpg"',
+                    "Cache-Control": "max-age=86400"  # Cache for 24 hours
+                }
+            )
+        except Exception as e:
+            raise HTTPException(500, f"Failed to stream frame: {e}")
+    
+    # Return URL metadata
+    try:
+        url = storage.get_presigned_url(object_path)
+        return {"url": url, "filename": filename}
+    except Exception as e:
+        raise HTTPException(500, f"Failed to get frame URL: {e}")
+
+
+@router.get("/evaluations/{evaluation_id}/thumbnails/{filename}")
+async def get_thumbnail(
+    evaluation_id: str,
+    filename: str,
+    item_id: Optional[str] = None,
+    stream: bool = Query(True, description="Stream content directly")
+):
+    """
+    Get a thumbnail image (small, optimized for filmstrip display).
+    
+    - stream=true: Returns the image content directly (default, recommended)
+    - stream=false: Returns presigned URL metadata
+    """
+    evaluation = EvaluationRepository.get_with_items(evaluation_id)
+    if not evaluation:
+        raise HTTPException(404, f"Evaluation {evaluation_id} not found")
+    
+    # Find item
+    item: Optional[EvaluationItemDTO] = None
+    if item_id:
+        item = next((i for i in evaluation.items if i.id == item_id), None)
+    elif len(evaluation.items) == 1:
+        item = evaluation.items[0]
+    
+    if not item:
+        raise HTTPException(400, "item_id required for multi-item evaluations")
+    
+    storage = get_storage_service()
+    
+    # Build object path for thumbnail
+    object_path = f"{storage.FRAME_THUMBS_PREFIX}{item.id}/{filename}.jpg"
+    
+    if not storage.object_exists(object_path):
+        raise HTTPException(404, f"Thumbnail not found: {filename}")
+    
+    if stream:
+        try:
+            content = storage.get_bytes(object_path)
+            return Response(
+                content=content,
+                media_type="image/jpeg",
+                headers={
+                    "Content-Disposition": f'inline; filename="{filename}.jpg"',
+                    "Cache-Control": "max-age=86400"  # Cache for 24 hours (thumbnails rarely change)
+                }
+            )
+        except Exception as e:
+            raise HTTPException(500, f"Failed to stream thumbnail: {e}")
+    
+    # Return URL metadata
+    try:
+        url = storage.get_presigned_url(object_path)
+        return {"url": url, "filename": filename}
+    except Exception as e:
+        raise HTTPException(500, f"Failed to get thumbnail URL: {e}")
 
 
 @router.get("/evaluations", response_model=EvaluationListResponse)

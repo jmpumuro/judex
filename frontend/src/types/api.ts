@@ -207,6 +207,25 @@ export interface Artifact {
   expires_at?: string
 }
 
+export interface ProcessedFrame {
+  id: string
+  index: number
+  timestamp: number
+  thumbnail_url: string  // Small thumbnail for filmstrip
+  full_url?: string      // Full-size frame (optional, available when thumbnails=true)
+}
+
+export interface FramesResponse {
+  evaluation_id: string
+  item_id: string
+  frames: ProcessedFrame[]
+  total: number
+  // Pagination fields
+  page: number
+  page_size: number
+  total_pages: number
+}
+
 // ============================================================================
 // Health/Status Types
 // ============================================================================

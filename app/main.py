@@ -1,5 +1,5 @@
 """
-SafeVid FastAPI application.
+Judex FastAPI application.
 
 API Structure (v1):
 - /v1/evaluate - Main evaluation endpoint
@@ -84,7 +84,7 @@ def preload_models():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown."""
-    logger.info("Starting SafeVid service")
+    logger.info("Starting Judex service")
     logger.info(f"Models cache: {settings.hf_home}")
     logger.info(f"Temp directory: {settings.temp_dir}")
     logger.info(f"Database: {settings.database_url.split('@')[1] if '@' in settings.database_url else 'configured'}")
@@ -102,7 +102,7 @@ async def lifespan(app: FastAPI):
     yield
     
     # Shutdown
-    logger.info("Shutting down SafeVid service")
+    logger.info("Shutting down Judex service")
 
 
 # Create FastAPI app

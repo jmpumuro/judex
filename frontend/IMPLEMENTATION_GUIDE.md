@@ -1,4 +1,4 @@
-# SafeVid React Implementation Guide
+# Judex React Implementation Guide
 
 ## Complete File Structure & Code
 
@@ -556,7 +556,7 @@ const Sidebar: FC = () => {
       {/* Logo */}
       <div className="p-6 border-b border-gray-800">
         <h1 className="text-2xl font-bold bg-gradient-to-r from-primary to-secondary bg-clip-text text-transparent">
-          SafeVid
+          Judex
         </h1>
         <p className="text-sm text-gray-400 mt-1">Video Safety Analysis</p>
       </div>
@@ -583,7 +583,7 @@ const Sidebar: FC = () => {
 
       {/* Footer */}
       <div className="p-4 border-t border-gray-800 text-xs text-gray-500">
-        <p>SafeVid v1.0.0</p>
+        <p>Judex v1.0.0</p>
         <p className="mt-1">AI-Powered Content Safety</p>
       </div>
     </aside>

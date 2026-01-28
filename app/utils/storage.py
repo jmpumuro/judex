@@ -26,6 +26,8 @@ class StorageService:
     UPLOADS_PREFIX = "uploads/"
     LABELED_PREFIX = "labeled/"
     THUMBNAILS_PREFIX = "thumbnails/"
+    FRAMES_PREFIX = "frames/"  # Full-size keyframes from video segmentation
+    FRAME_THUMBS_PREFIX = "frame_thumbs/"  # Small thumbnails for filmstrip display
     
     def __init__(self):
         self.client: Optional[Minio] = None
@@ -211,18 +213,19 @@ class StorageService:
         """
         Get a presigned URL for direct access.
         
-        Uses external endpoint client so signature matches the URL browsers will use.
+        Generates URL with the internal client (which can connect to MinIO),
+        then replaces the internal endpoint with the external one for browser access.
         
         Args:
             object_name: Name/path in bucket
             expires_hours: URL expiration time
             
         Returns:
-            Presigned URL (signed with external endpoint for browser access)
+            Presigned URL (with external endpoint for browser access)
         """
         self.initialize()
-        # Use external client so the signature matches the endpoint browsers will use
-        client = self._get_external_client()
+        # Use internal client which can connect to MinIO
+        client = self._get_client()
         
         from datetime import timedelta
         
@@ -232,6 +235,18 @@ class StorageService:
                 object_name=object_name,
                 expires=timedelta(hours=expires_hours)
             )
+            
+            # Replace internal endpoint with external endpoint for browser access
+            # MinIO signs URLs based on the endpoint used, but S3-compatible storage
+            # accepts requests to different hostnames as long as signature is valid
+            # when path-style addressing is used
+            internal_endpoint = settings.minio_endpoint
+            external_endpoint = settings.minio_external_endpoint
+            
+            if internal_endpoint != external_endpoint:
+                url = url.replace(internal_endpoint, external_endpoint, 1)
+                logger.debug(f"Replaced endpoint in presigned URL: {internal_endpoint} -> {external_endpoint}")
+            
             return url
             
         except S3Error as e:
@@ -300,6 +315,62 @@ class StorageService:
         object_name = f"{self.THUMBNAILS_PREFIX}{video_id}.jpg"
         return self.upload_bytes(data, object_name, "image/jpeg")
     
+    def upload_frame(
+        self, 
+        data: bytes, 
+        video_id: str, 
+        frame_index: int,
+        timestamp: float
+    ) -> str:
+        """
+        Upload a full-size keyframe from video segmentation.
+        
+        Args:
+            data: Image bytes (JPEG)
+            video_id: Video/item ID
+            frame_index: Frame index in video
+            timestamp: Timestamp in seconds
+        
+        Returns:
+            Object path in MinIO
+        """
+        # Format: frames/{video_id}/frame_{index:04d}_{timestamp_ms}.jpg
+        object_name = f"{self.FRAMES_PREFIX}{video_id}/frame_{frame_index:04d}_{int(timestamp*1000)}.jpg"
+        return self.upload_bytes(data, object_name, "image/jpeg")
+    
+    def upload_frame_thumbnail(
+        self, 
+        data: bytes, 
+        video_id: str, 
+        frame_index: int,
+        timestamp: float
+    ) -> str:
+        """
+        Upload a small thumbnail for filmstrip display.
+        
+        Args:
+            data: Image bytes (JPEG, small ~120px wide)
+            video_id: Video/item ID
+            frame_index: Frame index in video
+            timestamp: Timestamp in seconds
+        
+        Returns:
+            Object path in MinIO
+        """
+        # Format: frame_thumbs/{video_id}/thumb_{index:04d}_{timestamp_ms}.jpg
+        object_name = f"{self.FRAME_THUMBS_PREFIX}{video_id}/thumb_{frame_index:04d}_{int(timestamp*1000)}.jpg"
+        return self.upload_bytes(data, object_name, "image/jpeg")
+    
+    def list_frames(self, video_id: str) -> list:
+        """List all full-size frames for a video."""
+        prefix = f"{self.FRAMES_PREFIX}{video_id}/"
+        return self.list_objects(prefix)
+    
+    def list_frame_thumbnails(self, video_id: str) -> list:
+        """List all thumbnail frames for a video (for filmstrip)."""
+        prefix = f"{self.FRAME_THUMBS_PREFIX}{video_id}/"
+        return self.list_objects(prefix)
+    
     def get_video_url(self, video_id: str) -> Optional[str]:
         """Get URL for original video."""
         object_name = f"{self.UPLOADS_PREFIX}{video_id}.mp4"
@@ -320,6 +391,8 @@ class StorageService:
             f"{self.UPLOADS_PREFIX}{video_id}",
             f"{self.LABELED_PREFIX}{video_id}",
             f"{self.THUMBNAILS_PREFIX}{video_id}",
+            f"{self.FRAMES_PREFIX}{video_id}",
+            f"{self.FRAME_THUMBS_PREFIX}{video_id}",
         ]
         
         for prefix in prefixes:

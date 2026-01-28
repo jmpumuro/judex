@@ -1,5 +1,5 @@
 """
-Simple HTTP server to serve the SafeVid UI.
+Simple HTTP server to serve the Judex UI.
 """
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 import os
@@ -26,8 +26,8 @@ def run_server(port=8080):
     server_address = ('', port)
     httpd = HTTPServer(server_address, CORSRequestHandler)
     
-    print(f"SafeVid UI Server running on http://localhost:{port}")
-    print(f"Make sure SafeVid API is running on http://localhost:8012")
+    print(f"Judex UI Server running on http://localhost:{port}")
+    print(f"Make sure Judex API is running on http://localhost:8012")
     print("Press Ctrl+C to stop")
     
     try:

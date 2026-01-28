@@ -2,7 +2,6 @@
 Pipeline state definition for LangGraph.
 """
 from typing import TypedDict, List, Dict, Any, Optional, Callable
-from dataclasses import dataclass, field
 
 
 class PipelineState(TypedDict, total=False):
@@ -51,12 +50,14 @@ class PipelineState(TypedDict, total=False):
     transcript_moderation: List[Dict[str, Any]]
     ocr_moderation: List[Dict[str, Any]]
     
-    # Policy outputs (generic fusion)
-    criteria_scores: Dict[str, Any]  # Unified format from fusion
-    criterion_scores: Dict[str, float]  # Legacy - deprecated
+    # Policy outputs (from fusion)
+    criteria_scores: Dict[str, Any]  # Per-criterion scores from fusion
     violations: List[Dict[str, Any]]
     verdict: str
     confidence: float
+    
+    # Stage execution tracking (from PipelineRunner)
+    stage_runs: List[Dict[str, Any]]
     
     # Evidence
     evidence: Dict[str, Any]

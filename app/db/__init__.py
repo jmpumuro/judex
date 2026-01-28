@@ -1,5 +1,5 @@
 """
-Database module for SafeVid.
+Database module for Judex.
 """
 from app.db.connection import get_db, init_db, get_db_session, SessionLocal, engine
 from app.db.models import (
