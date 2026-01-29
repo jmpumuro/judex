@@ -2,22 +2,32 @@
 LLM report generation node.
 
 Uses Qwen (local) or OpenAI (cloud) for generating safety reports.
+
+Industry Standard: Uses LangGraph config for callbacks (not state).
 """
 import json
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+from langchain_core.runnables import RunnableConfig
+
 from app.pipeline.state import PipelineState
+from app.pipeline.callbacks import send_progress
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.utils.progress import send_progress, save_stage_output, format_stage_output
+from app.utils.progress import save_stage_output, format_stage_output
 
 logger = get_logger("node.llm_report")
 
 
-def generate_llm_report(state: PipelineState) -> PipelineState:
-    """Generate human-friendly report using Qwen (local) or OpenAI (cloud)."""
+def generate_llm_report_impl(state: PipelineState, config: Optional[RunnableConfig] = None) -> PipelineState:
+    """
+    Generate human-friendly report using Qwen (local) or OpenAI (cloud).
+    
+    Industry Standard: Receives config parameter for callbacks.
+    Progress is sent via config["callbacks"], not stored in state.
+    """
     logger.info("=== LLM Report Node ===")
     
-    send_progress(state.get("progress_callback"), "report_generation", "Generating analysis report", 92)
+    send_progress(config, "report_generation", "Generating analysis report", 92)
     
     # Prepare evidence summary
     evidence_summary = _prepare_evidence_summary(state)
@@ -29,7 +39,6 @@ def generate_llm_report(state: PipelineState) -> PipelineState:
         try:
             from app.models import get_qwen_llm, unload_qwen_llm, free_memory_for_llm
             
-            # Free memory from models that are done processing
             logger.info("Freeing memory for Qwen LLM...")
             free_memory_for_llm()
             
@@ -40,14 +49,12 @@ def generate_llm_report(state: PipelineState) -> PipelineState:
             state["report"] = report
             logger.info("Qwen report generated successfully")
             
-            # Unload Qwen immediately to free memory for next video
             unload_qwen_llm()
             
             return state
             
         except Exception as e:
             logger.warning(f"Qwen generation failed: {e}, falling back to OpenAI")
-            # Try to unload if it loaded partially
             try:
                 from app.models import unload_qwen_llm
                 unload_qwen_llm()
@@ -92,9 +99,14 @@ def generate_llm_report(state: PipelineState) -> PipelineState:
     return state
 
 
+# Legacy wrapper for backward compatibility
+def generate_llm_report(state: PipelineState) -> PipelineState:
+    """Legacy wrapper - calls impl without config."""
+    return generate_llm_report_impl(state, None)
+
+
 def _prepare_evidence_summary(state: PipelineState) -> Dict[str, Any]:
     """Prepare structured evidence summary for LLM."""
-    # Extract scores from criteria_scores (new format) or criterion_scores (legacy)
     criteria_scores = state.get("criteria_scores", {})
     criterion_scores = {}
     for crit_id, crit_data in criteria_scores.items():
@@ -106,7 +118,6 @@ def _prepare_evidence_summary(state: PipelineState) -> Dict[str, Any]:
     violations = state.get("violations", [])
     evidence = state.get("evidence", {})
     
-    # Summarize key findings
     violence_segments = evidence.get("violence_segments", [])
     high_violence = [s for s in violence_segments if s.get("violence_score", 0) > 0.5]
     
@@ -126,7 +137,7 @@ def _prepare_evidence_summary(state: PipelineState) -> Dict[str, Any]:
             "weapons_detected": len(vision_weapons)
         },
         "profanity": {
-            "words_found": list(set(transcript_profanity))[:10]  # Max 10
+            "words_found": list(set(transcript_profanity))[:10]
         },
         "substances": {
             "objects_detected": len(vision_substances)
@@ -174,7 +185,6 @@ def _generate_template_report(state: PipelineState) -> str:
     verdict = state.get("verdict", "UNKNOWN")
     violations = state.get("violations", [])
     
-    # Extract scores from criteria_scores (new format)
     criteria_scores = state.get("criteria_scores", {})
     criterion_scores = {}
     for crit_id, crit_data in criteria_scores.items():
@@ -187,11 +197,9 @@ def _generate_template_report(state: PipelineState) -> str:
     
     report_lines = []
     
-    # AI-Style Summary Header
     report_lines.append(f"## 🎬 Video Safety Analysis")
     report_lines.append(f"")
     
-    # Generate natural language summary based on verdict
     summary_text = ""
     if verdict == "SAFE":
         summary_text = f"This {duration:.1f}-second video has been analyzed and appears appropriate for general audiences. No significant safety concerns were detected across violence, profanity, sexual content, substance use, or hate speech categories."
@@ -215,7 +223,6 @@ def _generate_template_report(state: PipelineState) -> str:
     report_lines.append(f"**Final Verdict:** {verdict}")
     report_lines.append(f"")
     
-    # Detailed Findings
     report_lines.append(f"### 📊 Content Analysis")
     report_lines.append(f"")
     for criterion, score in sorted(criterion_scores.items(), key=lambda x: x[1], reverse=True):
@@ -232,7 +239,6 @@ def _generate_template_report(state: PipelineState) -> str:
         report_lines.append(f"- **{criterion.title()}**: {status} (score: {score:.2f}) - {desc}")
     report_lines.append(f"")
     
-    # Specific Violations with Timestamps
     if violations:
         report_lines.append(f"### 🚨 Violations Detected")
         report_lines.append(f"")
@@ -249,7 +255,6 @@ def _generate_template_report(state: PipelineState) -> str:
                 report_lines.append(f"**{criterion.title()}** ({severity} severity)")
             report_lines.append(f"")
     
-    # Age Guidance
     report_lines.append(f"### 👥 Recommended Guidance")
     report_lines.append(f"")
     if verdict == "SAFE":
@@ -262,7 +267,6 @@ def _generate_template_report(state: PipelineState) -> str:
         report_lines.append(f"Manual review required before making final content distribution decisions.")
     report_lines.append(f"")
     
-    # Limitations Footer
     report_lines.append(f"---")
     report_lines.append(f"")
     report_lines.append(f"*Note: This is an automated analysis using computer vision, speech recognition, and AI models. Borderline or nuanced cases should be reviewed by human moderators for final determination.*")

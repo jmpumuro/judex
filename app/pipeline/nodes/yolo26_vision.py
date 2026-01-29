@@ -2,6 +2,7 @@
 YOLO26 vision detection node.
 Creates labeled video with bounding boxes and uploads to storage immediately.
 """
+import os
 from pathlib import Path
 from app.pipeline.state import PipelineState
 from app.core.logging import get_logger
@@ -12,6 +13,9 @@ from app.utils.ffmpeg import create_labeled_video
 from app.utils.storage import get_storage_service
 
 logger = get_logger("node.yolo26")
+
+# Enable labeled video creation via environment variable (default: enabled)
+CREATE_LABELED_VIDEO = os.getenv("CREATE_LABELED_VIDEO", "true").lower() == "true"
 
 
 def run_yolo26_vision(state: PipelineState) -> PipelineState:
@@ -53,40 +57,55 @@ def run_yolo26_vision(state: PipelineState) -> PipelineState:
         signals = detector.get_safety_signals(all_detections)
         logger.info(f"Safety signals: weapons={signals['weapon_count']}, substances={signals['substance_count']}")
     
-    # Create labeled video with bounding boxes and upload immediately
-    if all_detections:
+    # Create labeled video with bounding boxes
+    labeled_video_path = None
+    if CREATE_LABELED_VIDEO and all_detections:
         try:
-            send_progress(state.get("progress_callback"), "yolo26_vision", "Creating labeled video", 80)
+            send_progress(state.get("progress_callback"), "yolo26_vision", "Creating labeled video", 70)
             
-            video_path = state["video_path"]
-            work_dir = state["work_dir"]
+            video_path = state.get("video_path")
+            work_dir = state.get("work_dir")
             video_id = state.get("video_id")
-            fps = state.get("fps", 30.0)
+            fps = state.get("fps", 30)
+            violence_segments = state.get("violence_segments", [])
             
-            # Get violence segments if available (may not be available yet in pipeline order)
-            violence_segments = state.get("violence_segments", None)
-            
-            labeled_video_path = str(Path(work_dir) / "labeled.mp4")
-            create_labeled_video(video_path, labeled_video_path, all_detections, fps, violence_segments)
-            
-            state["labeled_video_path"] = labeled_video_path
-            logger.info(f"Created labeled video: {labeled_video_path}")
-            
-            # Upload labeled video to MinIO immediately for early UI access
-            if video_id and Path(labeled_video_path).exists():
-                try:
-                    send_progress(state.get("progress_callback"), "yolo26_vision", "Uploading labeled video", 90)
+            if video_path and work_dir:
+                output_path = str(Path(work_dir) / "labeled.mp4")
+                
+                labeled_video_path = create_labeled_video(
+                    video_path=video_path,
+                    output_path=output_path,
+                    detections=all_detections,
+                    fps=fps,
+                    violence_segments=violence_segments
+                )
+                
+                if labeled_video_path and Path(labeled_video_path).exists():
+                    # Upload to storage
                     storage = get_storage_service()
-                    minio_path = storage.upload_labeled_video(labeled_video_path, video_id)
-                    state["labeled_video_path"] = minio_path  # Update to MinIO path
-                    logger.info(f"Uploaded labeled video to storage: {minio_path}")
-                except Exception as upload_err:
-                    logger.warning(f"Failed to upload labeled video to storage: {upload_err}")
-                    # Keep local path as fallback
-            
+                    stored_path = storage.upload_labeled_video(labeled_video_path, video_id)
+                    state["labeled_video_path"] = stored_path
+                    logger.info(f"Labeled video uploaded: {stored_path}")
+                    
+                    # INDUSTRY STANDARD: Persist directly to database immediately
+                    # This ensures the path is saved even if pipeline fails later
+                    if video_id:
+                        try:
+                            from app.api.evaluations import EvaluationRepository
+                            EvaluationRepository.update_item(video_id, labeled_video_path=stored_path)
+                            logger.info(f"Labeled video path persisted to DB: {stored_path}")
+                        except Exception as db_err:
+                            logger.warning(f"Failed to persist labeled_video_path to DB: {db_err}")
+                else:
+                    logger.warning("Labeled video was not created")
         except Exception as e:
             logger.error(f"Failed to create labeled video: {e}")
-            # Don't fail the pipeline if labeled video creation fails
+            # Non-fatal - continue without labeled video
+    else:
+        if not CREATE_LABELED_VIDEO:
+            logger.info("Labeled video creation disabled via CREATE_LABELED_VIDEO=false")
+        elif not all_detections:
+            logger.info("No detections - skipping labeled video creation")
     
     # Save stage output for real-time retrieval
     signals = detector.get_safety_signals(all_detections) if all_detections else {}
@@ -103,7 +122,8 @@ def run_yolo26_vision(state: PipelineState) -> PipelineState:
         frames_analyzed=len(sampled_frames),
         detection_summary=detection_summary,
         safety_signals=signals,
-        labeled_video_created=state.get("labeled_video_path") is not None,
+        labeled_video_created=labeled_video_path is not None,
+        labeled_video_path=state.get("labeled_video_path"),
         # Include top 20 detections for preview
         detections=all_detections[:20] if all_detections else []
     ))

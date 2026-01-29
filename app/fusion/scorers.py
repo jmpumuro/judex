@@ -57,6 +57,16 @@ class DetectorSignals:
     drugs_score: float = 0.0
     hate_score: float = 0.0
     
+    # External stage results
+    external_verdicts: List[str] = field(default_factory=list)  # PASS, REVIEW, FAIL
+    external_risk_scores: List[float] = field(default_factory=list)
+    external_violations: List[Dict[str, Any]] = field(default_factory=list)
+    external_confidence: float = 0.0
+    
+    # Skipped stages tracking
+    skipped_stages: List[str] = field(default_factory=list)
+    skipped_supporting_count: int = 0  # Number of skipped SUPPORTING stages
+    
     @classmethod
     def from_state(cls, state: Dict[str, Any]) -> "DetectorSignals":
         """Build signals from pipeline state."""
@@ -89,6 +99,38 @@ class DetectorSignals:
         
         all_mod = transcript_mod + ocr_mod
         
+        # Extract external stage results
+        external_verdicts = []
+        external_risk_scores = []
+        external_violations = []
+        external_confidence = 0.0
+        
+        # Look for external stage outputs in state (keys starting with 'external_stage_')
+        for key, value in state.items():
+            if key.startswith("external_stage_") and isinstance(value, dict):
+                if value.get("status") == "completed":
+                    # Also check the mapped output fields
+                    pass
+            # Check for mapped external stage outputs (verdict, risk_score, violations, confidence)
+            if key == "verdict" and isinstance(value, str) and value in ("PASS", "REVIEW", "FAIL"):
+                external_verdicts.append(value)
+            if key == "risk_score" and isinstance(value, (int, float)):
+                external_risk_scores.append(float(value))
+            if key == "violations" and isinstance(value, list):
+                external_violations.extend(value)
+            if key == "confidence" and isinstance(value, (int, float)):
+                external_confidence = max(external_confidence, float(value))
+        
+        # Extract skipped stages from stage_runs
+        skipped_stages = []
+        skipped_supporting_count = 0
+        stage_runs = state.get("stage_runs", [])
+        for run in stage_runs:
+            if run.get("status") == "skipped":
+                skipped_stages.append(run.get("stage_id", ""))
+                if run.get("impact") == "supporting":
+                    skipped_supporting_count += 1
+        
         return cls(
             vision_classes=[d.get("label", "").lower() for d in vision_detections],
             vision_confidences=[d.get("confidence", 0) for d in vision_detections],
@@ -104,7 +146,13 @@ class DetectorSignals:
             violence_text_score=max_score(all_mod, "violence_score"),
             sexual_score=max_score(all_mod, "sexual_score"),
             drugs_score=max_score(all_mod, "drugs_score"),
-            hate_score=max_score(all_mod, "hate_score")
+            hate_score=max_score(all_mod, "hate_score"),
+            external_verdicts=external_verdicts,
+            external_risk_scores=external_risk_scores,
+            external_violations=external_violations,
+            external_confidence=external_confidence,
+            skipped_stages=skipped_stages,
+            skipped_supporting_count=skipped_supporting_count,
         )
     
     def has_class(self, target_classes: Set[str]) -> bool:

@@ -322,6 +322,99 @@ class Criteria(Base):
         }
 
 
+class ExternalStageConfig(Base):
+    """
+    External stage configurations stored as YAML.
+    
+    Users can define custom pipeline stages via YAML that call
+    external HTTP endpoints. These are dynamically loaded at runtime.
+    """
+    __tablename__ = "external_stage_configs"
+    
+    id = Column(String(64), primary_key=True)  # e.g., "customer_policy_v1"
+    name = Column(String(100), nullable=False)
+    description = Column(Text, nullable=True)
+    
+    # The raw YAML content
+    yaml_content = Column(Text, nullable=False)
+    
+    # Parsed stage IDs (comma-separated for quick lookup)
+    stage_ids = Column(String(500), nullable=True)
+    
+    # Status
+    enabled = Column(Boolean, default=True)
+    validated = Column(Boolean, default=False)
+    validation_error = Column(Text, nullable=True)
+    
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "yaml_content": self.yaml_content,
+            "stage_ids": self.stage_ids.split(",") if self.stage_ids else [],
+            "enabled": self.enabled,
+            "validated": self.validated,
+            "validation_error": self.validation_error,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class StageSettings(Base):
+    """
+    Persisted settings for pipeline stages (both builtin and external).
+    
+    This enables auditable enable/disable of stages without modifying
+    the stage registry or graph structure.
+    """
+    __tablename__ = "stage_settings"
+    
+    id = Column(String(64), primary_key=True)  # Stage type ID (e.g., "yolo26", "custom_policy")
+    
+    # Enable/disable
+    enabled = Column(Boolean, default=True)
+    
+    # Impact level (critical/supporting/advisory)
+    impact = Column(String(20), default="supporting")
+    
+    # If true, cannot be disabled via UI
+    required = Column(Boolean, default=False)
+    
+    # Stage metadata (cached for fast access)
+    display_name = Column(String(100), nullable=True)
+    is_builtin = Column(Boolean, default=False)
+    is_external = Column(Boolean, default=False)
+    
+    # Audit trail
+    last_toggled_by = Column(String(100), nullable=True)  # Future: user tracking
+    last_toggled_at = Column(DateTime, nullable=True)
+    toggle_reason = Column(Text, nullable=True)
+    
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "enabled": self.enabled,
+            "impact": self.impact,
+            "required": self.required,
+            "display_name": self.display_name,
+            "is_builtin": self.is_builtin,
+            "is_external": self.is_external,
+            "last_toggled_at": self.last_toggled_at.isoformat() if self.last_toggled_at else None,
+            "toggle_reason": self.toggle_reason,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
 class LiveEvent(Base):
     """Live feed detection events."""
     __tablename__ = "live_events"

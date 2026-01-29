@@ -157,10 +157,56 @@ class EvaluationRepository:
                 session.commit()
     
     @staticmethod
+    def update_item_stage(item_id: str, stage: str, progress: int) -> None:
+        """Update item's current stage and progress."""
+        with get_session() as session:
+            item = session.query(EvaluationItem).filter(EvaluationItem.id == item_id).first()
+            if item:
+                item.current_stage = stage
+                item.progress = progress
+                session.commit()
+    
+    @staticmethod
+    def update_evaluation_counts(evaluation_id: str) -> None:
+        """Update evaluation's completed/failed item counts based on item statuses."""
+        with get_session() as session:
+            evaluation = session.query(Evaluation).filter(Evaluation.id == evaluation_id).first()
+            if not evaluation:
+                return
+            
+            # Count items by status
+            completed = 0
+            failed = 0
+            for item in evaluation.items:
+                if item.status == EvaluationStatus.COMPLETED:
+                    completed += 1
+                elif item.status == EvaluationStatus.FAILED:
+                    failed += 1
+            
+            evaluation.items_completed = completed
+            evaluation.items_failed = failed
+            
+            # Update overall status if all items are done
+            total = evaluation.items_total
+            if total > 0 and (completed + failed) >= total:
+                if failed > 0 and completed == 0:
+                    evaluation.status = EvaluationStatus.FAILED
+                elif failed > 0:
+                    evaluation.status = EvaluationStatus.COMPLETED  # Partial success
+                else:
+                    evaluation.status = EvaluationStatus.COMPLETED
+                evaluation.completed_at = datetime.utcnow()
+                evaluation.progress = 100
+            
+            session.commit()
+    
+    @staticmethod
     def save_stage_output(item_id: str, stage_name: str, output: Dict) -> bool:
         """
-        Save stage output for an evaluation item.
-        This is called after each stage completes to store its results.
+        Save stage output for an evaluation item (PostgreSQL persistence).
+        
+        INDUSTRY STANDARD: Stage outputs are persisted immediately to PostgreSQL,
+        not ephemeral storage like Redis. This ensures data survives container restarts.
         
         Args:
             item_id: Evaluation item ID
@@ -172,27 +218,36 @@ class EvaluationRepository:
         """
         from sqlalchemy.orm.attributes import flag_modified
         
-        with get_session() as session:
-            item = session.query(EvaluationItem).filter(EvaluationItem.id == item_id).first()
-            if not item:
-                logger.warning(f"Cannot save stage output: item {item_id} not found")
-                return False
-            
-            # Initialize stage_outputs if None
-            if item.stage_outputs is None:
-                item.stage_outputs = {}
-            
-            # Merge new stage output
-            current_outputs = item.stage_outputs or {}
-            current_outputs[stage_name] = output
-            item.stage_outputs = current_outputs
-            
-            # Flag JSON field as modified so SQLAlchemy detects the change
-            flag_modified(item, 'stage_outputs')
-            
-            session.commit()
-            logger.debug(f"Saved stage output '{stage_name}' for item {item_id}")
-            return True
+        if not item_id:
+            logger.warning(f"save_stage_output called without item_id for stage {stage_name}")
+            return False
+        
+        try:
+            with get_session() as session:
+                item = session.query(EvaluationItem).filter(EvaluationItem.id == item_id).first()
+                if not item:
+                    logger.warning(f"Cannot save stage output: item {item_id} not found")
+                    return False
+                
+                # Initialize stage_outputs if None
+                if item.stage_outputs is None:
+                    item.stage_outputs = {}
+                
+                # Deep copy to ensure mutation is detected
+                current_outputs = dict(item.stage_outputs) if item.stage_outputs else {}
+                current_outputs[stage_name] = output
+                item.stage_outputs = current_outputs
+                
+                # Flag JSON field as modified so SQLAlchemy detects the change
+                flag_modified(item, 'stage_outputs')
+                
+                session.commit()
+                logger.info(f"✓ Stage output '{stage_name}' persisted to PostgreSQL (item: {item_id})")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Failed to save stage output for {item_id}/{stage_name}: {e}", exc_info=True)
+            return False
     
     @staticmethod
     def get_stage_output(item_id: str, stage_name: str) -> Optional[Dict]:
@@ -335,6 +390,7 @@ async def process_evaluation_item(
         
         # Update labeled video path in database
         # Note: The labeled video is now uploaded during yolo26_vision stage for early access
+        logger.info(f"Checking for labeled_video_path in result: {result.get('labeled_video_path')}")
         if result.get("labeled_video_path"):
             labeled_path = result["labeled_video_path"]
             storage = get_storage_service()
@@ -343,7 +399,7 @@ async def process_evaluation_item(
             if labeled_path.startswith(storage.LABELED_PREFIX):
                 # Already in MinIO, just update the database
                 EvaluationRepository.update_item(item_id, labeled_video_path=labeled_path)
-                logger.info(f"Labeled video already in storage: {labeled_path}")
+                logger.info(f"Labeled video saved to DB: {labeled_path}")
             elif Path(labeled_path).exists():
                 # Local path - upload to MinIO (fallback for older code paths)
                 try:
@@ -446,6 +502,8 @@ async def create_evaluation(
     criteria_snapshot = None
     resolved_criteria_id = None
     
+    logger.info(f"Received evaluation request - criteria_id={criteria_id}, criteria={criteria is not None}")
+    
     if criteria:
         # Inline criteria provided
         import json
@@ -454,6 +512,7 @@ async def create_evaluation(
         except json.JSONDecodeError:
             import yaml
             criteria_snapshot = yaml.safe_load(criteria)
+        logger.info(f"Using inline criteria: {criteria_snapshot.get('name', 'unnamed')}")
     elif criteria_id:
         # Load from database (presets are seeded on startup)
         with get_session() as session:
@@ -462,6 +521,7 @@ async def create_evaluation(
                 raise HTTPException(404, f"Criteria '{criteria_id}' not found")
             criteria_snapshot = saved.config
             resolved_criteria_id = criteria_id
+            logger.info(f"Loaded criteria from DB: {criteria_id} -> {criteria_snapshot.get('name', 'unnamed')}")
     else:
         # Default to child_safety
         with get_session() as session:
@@ -469,6 +529,7 @@ async def create_evaluation(
             if default:
                 criteria_snapshot = default.config
                 resolved_criteria_id = "child_safety"
+        logger.info(f"No criteria specified, using default: child_safety")
     
     # Create evaluation
     evaluation_id = EvaluationRepository.create(
@@ -947,3 +1008,196 @@ async def delete_evaluation(evaluation_id: str):
         session.commit()
     
     return {"status": "deleted", "evaluation_id": evaluation_id}
+
+
+@router.post("/evaluations/{evaluation_id}/reprocess")
+async def reprocess_evaluation(
+    evaluation_id: str,
+    background_tasks: BackgroundTasks,
+    skip_early_stages: bool = Query(True, description="Skip ingest/segment if data already exists"),
+):
+    """
+    Reprocess an evaluation with current stage settings.
+    
+    This allows re-running the analysis pipeline after enabling/disabling stages.
+    If skip_early_stages=True (default), skips ingest and segment stages if the
+    video data and frames are already available.
+    
+    Returns updated evaluation status.
+    """
+    # Use raw DB query so we can access criteria_snapshot
+    # Extract all needed data while in session to avoid DetachedInstanceError
+    with get_session() as session:
+        evaluation = session.query(Evaluation).filter(Evaluation.id == evaluation_id).first()
+        if not evaluation:
+            raise HTTPException(404, f"Evaluation {evaluation_id} not found")
+        
+        if not evaluation.items:
+            raise HTTPException(400, "Evaluation has no items to reprocess")
+        
+        # Capture criteria snapshot while in session
+        criteria_snapshot = evaluation.criteria_snapshot
+        
+        # Extract item data as plain dicts while in session
+        item_info_list = [
+            {"id": item.id, "uploaded_video_path": item.uploaded_video_path}
+            for item in evaluation.items
+        ]
+    
+    # Reset evaluation status
+    EvaluationRepository.update_status(
+        evaluation_id,
+        EvaluationStatus.PROCESSING,
+        progress=0,
+        current_stage="reprocessing"
+    )
+    
+    # Prepare items for reprocessing
+    items_data = []
+    storage = get_storage_service()
+    
+    for item_info in item_info_list:
+        item_id = item_info["id"]
+        uploaded_path = item_info["uploaded_video_path"]
+        
+        # Reset item status
+        with get_session() as session:
+            db_item = session.query(EvaluationItem).filter(EvaluationItem.id == item_id).first()
+            if db_item:
+                db_item.status = DBEvaluationStatus.PROCESSING
+                db_item.progress = 0
+                db_item.current_stage = "reprocessing"
+                # Keep stage_outputs but clear result for re-scoring
+                if db_item.result:
+                    session.delete(db_item.result)
+                session.commit()
+        
+        # Get video path - try uploaded video from MinIO first
+        video_path = None
+        if uploaded_path:
+            # Download from MinIO to temp file for reprocessing
+            try:
+                temp_dir = Path(tempfile.mkdtemp())
+                temp_path = temp_dir / f"{item_id}.mp4"
+                storage.download_file(uploaded_path, str(temp_path))
+                video_path = str(temp_path)
+                logger.info(f"Downloaded video from MinIO for reprocessing: {video_path}")
+            except Exception as e:
+                logger.warning(f"Could not download video from MinIO: {e}")
+        
+        if not video_path:
+            raise HTTPException(400, f"Video file not available for item {item_id}")
+        
+        items_data.append({
+            "item_id": item_id,
+            "video_path": video_path,
+            "resume_from_checkpoint": skip_early_stages,  # Use checkpoint if skipping early stages
+        })
+    
+    # Start reprocessing in background
+    async def reprocess_items():
+        from app.evaluation.criteria import parse_criteria, CHILD_SAFETY_CRITERIA
+        
+        # Get criteria from captured snapshot
+        if criteria_snapshot:
+            criteria = parse_criteria(criteria_snapshot)
+        else:
+            criteria = CHILD_SAFETY_CRITERIA
+        
+        for item_data in items_data:
+            await reprocess_evaluation_item(
+                evaluation_id=evaluation_id,
+                item_id=item_data["item_id"],
+                video_path=item_data["video_path"],
+                criteria=criteria,
+                resume_from_checkpoint=item_data.get("resume_from_checkpoint", True),
+            )
+        
+        logger.info(f"Reprocessing of evaluation {evaluation_id} complete")
+    
+    background_tasks.add_task(reprocess_items)
+    
+    return {
+        "status": "reprocessing",
+        "evaluation_id": evaluation_id,
+        "items_count": len(items_data),
+        "skip_early_stages": skip_early_stages,
+    }
+
+
+async def reprocess_evaluation_item(
+    evaluation_id: str,
+    item_id: str,
+    video_path: str,
+    criteria,
+    resume_from_checkpoint: bool = True,
+):
+    """
+    Reprocess a single evaluation item.
+    
+    Uses proper LangGraph checkpointing:
+    - If resume_from_checkpoint=True, continues from last checkpoint
+    - All state is properly serialized and restored
+    """
+    from app.pipeline.graph import run_pipeline
+    from app.api.sse import sse_manager
+    
+    logger.info(f"Reprocessing item {item_id} (resume_from_checkpoint={resume_from_checkpoint})")
+    
+    try:
+        # Progress callback
+        async def progress_callback(stage: str, message: str, progress: int):
+            EvaluationRepository.update_item_stage(item_id, stage, progress)
+            await sse_manager.send_progress(evaluation_id, stage, message, progress)
+        
+        # Run pipeline with checkpointing support
+        result = await run_pipeline(
+            video_path=video_path,
+            criteria=criteria,
+            video_id=item_id,
+            progress_callback=progress_callback,
+            resume_from_checkpoint=resume_from_checkpoint,
+        )
+        
+        # Save result
+        verdict = result.get("verdict", "NEEDS_REVIEW")
+        confidence = result.get("confidence", 0.0)
+        
+        with get_session() as session:
+            item = session.query(EvaluationItem).filter(EvaluationItem.id == item_id).first()
+            if item:
+                item.status = DBEvaluationStatus.COMPLETED
+                item.progress = 100
+                item.current_stage = None
+                item.stage_outputs = result.get("stage_outputs", {})
+                
+                # Create new result
+                db_result = EvaluationResult(
+                    item_id=item_id,
+                    verdict=DBVerdict(verdict),
+                    confidence=confidence,
+                    criteria_scores=result.get("criteria_scores", {}),
+                    violations=result.get("violations", []),
+                    processing_time=result.get("processing_time"),
+                    transcript=result.get("transcript"),
+                    report=result.get("report"),
+                )
+                session.add(db_result)
+                session.commit()
+        
+        # Update evaluation status
+        EvaluationRepository.update_evaluation_counts(evaluation_id)
+        
+        logger.info(f"Item {item_id} reprocessed: verdict={verdict}")
+        
+    except Exception as e:
+        logger.error(f"Failed to reprocess item {item_id}: {e}", exc_info=True)
+        
+        with get_session() as session:
+            item = session.query(EvaluationItem).filter(EvaluationItem.id == item_id).first()
+            if item:
+                item.status = DBEvaluationStatus.FAILED
+                item.error_message = str(e)
+                session.commit()
+        
+        EvaluationRepository.update_evaluation_counts(evaluation_id)

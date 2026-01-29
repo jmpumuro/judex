@@ -20,6 +20,30 @@ class StageStatus(str, Enum):
     SKIPPED = "skipped"
 
 
+class StageImpact(str, Enum):
+    """
+    Impact level of a stage on the final verdict.
+    
+    - CRITICAL: Cannot be disabled; pipeline fails if stage fails
+    - SUPPORTING: Contributes significantly; warning if skipped
+    - ADVISORY: Optional enhancement; safe to skip
+    """
+    CRITICAL = "critical"
+    SUPPORTING = "supporting"
+    ADVISORY = "advisory"
+
+
+# Default impact levels for builtin stages
+STAGE_IMPACT_DEFAULTS: Dict[str, StageImpact] = {
+    "yolo26": StageImpact.SUPPORTING,
+    "yoloworld": StageImpact.ADVISORY,
+    "violence": StageImpact.SUPPORTING,  # xclip
+    "whisper": StageImpact.SUPPORTING,
+    "ocr": StageImpact.ADVISORY,
+    "text_moderation": StageImpact.SUPPORTING,
+}
+
+
 @dataclass
 class StageSpec:
     """
@@ -27,15 +51,41 @@ class StageSpec:
     
     This is the configuration passed to a stage, typically derived from
     the evaluation criteria or an explicit pipeline definition.
+    
+    Attributes:
+        type: Stage type (registry key)
+        id: Unique ID for this stage instance
+        enabled: Whether the stage should run
+        impact: Impact level on final verdict (critical/supporting/advisory)
+        required: If True, cannot be disabled via UI
+        config: Stage-specific configuration
+        skip_reason: If skipped, explains why
     """
     type: str  # Stage type (registry key)
     id: str = ""  # Unique ID for this stage instance (auto-generated if empty)
     enabled: bool = True
+    impact: StageImpact = StageImpact.SUPPORTING
+    required: bool = False  # If True, cannot be disabled
     config: Dict[str, Any] = field(default_factory=dict)  # Stage-specific config
+    skip_reason: Optional[str] = None  # Populated if skipped
     
     def __post_init__(self):
         if not self.id:
             self.id = self.type
+        # Apply default impact if not set
+        if self.type in STAGE_IMPACT_DEFAULTS:
+            self.impact = STAGE_IMPACT_DEFAULTS[self.type]
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for API/persistence."""
+        return {
+            "type": self.type,
+            "id": self.id,
+            "enabled": self.enabled,
+            "impact": self.impact.value,
+            "required": self.required,
+            "skip_reason": self.skip_reason,
+        }
 
 
 class StagePlugin(ABC):

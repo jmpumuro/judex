@@ -1,45 +1,67 @@
 """
-Stable LangGraph pipeline definition.
+Stable LangGraph pipeline with PostgreSQL checkpointing.
 
-This module provides a STABLE graph structure that does not change per-request.
-Dynamic detector selection happens inside the run_pipeline node via PipelineRunner.
+This module provides a STABLE graph structure that:
+- Uses proper LangGraph checkpointing for state persistence
+- Uses LangGraph-native callbacks (industry standard)
+- Enables resume from any node boundary
+- Full state serialization (checkpoint-safe)
 
 Graph structure:
   ingest_video -> segment_video -> run_pipeline -> fuse_policy -> llm_report -> END
                                         |
                                         └─> (dynamic stages via PipelineRunner)
 
-The run_pipeline node:
-1. Reads evaluation_criteria from state
-2. Routes criteria to detectors (or uses explicit pipeline definition)
-3. Executes stages dynamically via PipelineRunner
-4. Returns state with all detector outputs merged
-
-This design:
-- Avoids graph-per-request compilation overhead
-- Supports pluggable stages without changing graph structure
-- Maintains backward compatibility with existing criteria/presets
+Industry Standard Approach:
+- Callbacks are passed via config["callbacks"], not state
+- Evaluation criteria passed via config["configurable"]["evaluation_criteria"]
+- State contains ONLY serializable data (checkpoint-safe)
 """
 import asyncio
+from typing import Optional, Dict, Any
 from langgraph.graph import StateGraph, END
+from langchain_core.runnables import RunnableConfig
+
 from app.pipeline.state import PipelineState
-from app.pipeline.nodes.ingest_video import ingest_video
-from app.pipeline.nodes.segment_video import segment_video
-from app.pipeline.nodes.run_pipeline import run_pipeline_node
-from app.pipeline.nodes.llm_report import generate_llm_report
+from app.pipeline.callbacks import (
+    create_pipeline_config,
+    get_progress_callback,
+    get_evaluation_criteria,
+    send_progress,
+)
 from app.core.logging import get_logger
 from app.utils.timing import TimingTracker
 
 logger = get_logger("graph")
 
 
-# ===== FUSION NODE =====
+# ===== NODE WRAPPERS =====
+# These wrap the actual node functions to inject config handling
 
-def fuse_policy_generic(state: PipelineState) -> PipelineState:
+def ingest_video_with_config(state: PipelineState, config: RunnableConfig) -> PipelineState:
+    """Ingest video node with LangGraph config support."""
+    from app.pipeline.nodes.ingest_video import ingest_video_impl
+    return ingest_video_impl(state, config)
+
+
+def segment_video_with_config(state: PipelineState, config: RunnableConfig) -> PipelineState:
+    """Segment video node with LangGraph config support."""
+    from app.pipeline.nodes.segment_video import segment_video_impl
+    return segment_video_impl(state, config)
+
+
+def run_pipeline_with_config(state: PipelineState, config: RunnableConfig) -> PipelineState:
+    """Run pipeline node with LangGraph config support."""
+    from app.pipeline.nodes.run_pipeline import run_pipeline_node_impl
+    return run_pipeline_node_impl(state, config)
+
+
+def fuse_policy_with_config(state: PipelineState, config: RunnableConfig) -> PipelineState:
     """
     Fuse evidence into criterion scores using Strategy/Factory patterns.
     
     Uses unified result format from app.evaluation.result.
+    Industry standard: Gets criteria from config, not state.
     """
     from app.utils.progress import save_stage_output
     from app.fusion.scorers import DetectorSignals, compute_criterion_score
@@ -47,9 +69,14 @@ def fuse_policy_generic(state: PipelineState) -> PipelineState:
     from app.evaluation.result import create_criterion_score, Violation
     from app.evaluation.criteria import EvaluationCriteria, CHILD_SAFETY_CRITERIA
     
-    criteria: EvaluationCriteria = state.get("evaluation_criteria")
+    # Send progress via config callbacks (industry standard)
+    send_progress(config, "policy_fusion", "Computing safety scores", 85)
+    
+    # Get criteria from config (industry standard - not from state)
+    criteria: EvaluationCriteria = get_evaluation_criteria(config)
+    
     if not criteria:
-        logger.warning("No evaluation_criteria in state, using defaults")
+        logger.warning("No evaluation_criteria in config, using defaults")
         criteria = CHILD_SAFETY_CRITERIA
     
     # Build signals from state
@@ -93,6 +120,46 @@ def fuse_policy_generic(state: PipelineState) -> PipelineState:
     final_verdict = verdict_result.verdict.value
     confidence = verdict_result.confidence
     
+    # Factor in external stage results
+    if signals.external_verdicts:
+        logger.info(f"External stage verdicts: {signals.external_verdicts}")
+        
+        # If any external stage says FAIL, escalate to UNSAFE
+        if "FAIL" in signals.external_verdicts:
+            if final_verdict == "SAFE":
+                final_verdict = "UNSAFE"
+                logger.info("External stage FAIL escalated verdict to UNSAFE")
+        
+        # If external stage says REVIEW and we're SAFE, escalate to NEEDS_REVIEW
+        elif "REVIEW" in signals.external_verdicts:
+            if final_verdict == "SAFE":
+                final_verdict = "NEEDS_REVIEW"
+                logger.info("External stage REVIEW escalated verdict to NEEDS_REVIEW")
+        
+        # Add external violations to the list
+        for ext_violation in signals.external_violations:
+            violations.append({
+                "criterion": "external_policy",
+                "label": ext_violation.get("policy_name", "External Policy"),
+                "severity": ext_violation.get("severity", "medium"),
+                "score": ext_violation.get("confidence", 0.5),
+                "description": ext_violation.get("description", ""),
+                "source": "external_stage"
+            })
+        
+        # Adjust confidence based on external confidence
+        if signals.external_confidence > 0:
+            confidence = (confidence + signals.external_confidence) / 2
+    
+    # Reduce confidence if supporting stages were skipped
+    if signals.skipped_supporting_count > 0:
+        confidence_reduction = min(0.15 * signals.skipped_supporting_count, 0.3)
+        confidence = max(0.1, confidence - confidence_reduction)
+        logger.warning(
+            f"Reduced confidence by {confidence_reduction:.2f} due to "
+            f"{signals.skipped_supporting_count} skipped supporting stage(s)"
+        )
+    
     # Build stage output
     stage_output = {
         "verdict": final_verdict,
@@ -100,7 +167,9 @@ def fuse_policy_generic(state: PipelineState) -> PipelineState:
         "criteria": criteria_scores,
         "violations": violations,
         "criteria_evaluated": len(criteria_scores),
-        "verdict_strategy": verdict_strategy.__class__.__name__
+        "verdict_strategy": verdict_strategy.__class__.__name__,
+        "skipped_stages": signals.skipped_stages,
+        "skipped_supporting_count": signals.skipped_supporting_count,
     }
     
     # Save stage output for UI
@@ -113,32 +182,39 @@ def fuse_policy_generic(state: PipelineState) -> PipelineState:
     state["violations"] = violations
     state["verdict"] = final_verdict
     state["confidence"] = confidence
+    state["skipped_stages"] = signals.skipped_stages
     
-    logger.info(f"Fusion complete: {final_verdict} (confidence: {confidence:.2f})")
+    if signals.skipped_stages:
+        logger.info(f"Fusion complete: {final_verdict} (confidence: {confidence:.2f}) - {len(signals.skipped_stages)} stages skipped")
+    else:
+        logger.info(f"Fusion complete: {final_verdict} (confidence: {confidence:.2f})")
     
     return state
 
 
-# ===== STABLE GRAPH BUILDER =====
+def generate_llm_report_with_config(state: PipelineState, config: RunnableConfig) -> PipelineState:
+    """LLM report node with LangGraph config support."""
+    from app.pipeline.nodes.llm_report import generate_llm_report_impl
+    return generate_llm_report_impl(state, config)
 
-def build_stable_graph() -> StateGraph:
+
+# ===== GRAPH BUILDER =====
+
+def build_graph_workflow() -> StateGraph:
     """
-    Build the stable LangGraph pipeline.
+    Build the LangGraph workflow (uncompiled).
     
-    This graph is compiled ONCE and reused for all evaluations.
-    Dynamic detector selection happens inside run_pipeline node.
-    
-    Returns:
-        Compiled StateGraph
+    All nodes receive (state, config) - the industry standard signature
+    that allows callbacks and metadata to be passed via config.
     """
     workflow = StateGraph(PipelineState)
     
-    # Add nodes (fixed set)
-    workflow.add_node("ingest_video", ingest_video)
-    workflow.add_node("segment_video", segment_video)
-    workflow.add_node("run_pipeline", run_pipeline_node)  # Dynamic stages inside
-    workflow.add_node("fuse_policy", fuse_policy_generic)
-    workflow.add_node("generate_llm_report", generate_llm_report)
+    # Add nodes with config support (industry standard)
+    workflow.add_node("ingest_video", ingest_video_with_config)
+    workflow.add_node("segment_video", segment_video_with_config)
+    workflow.add_node("run_pipeline", run_pipeline_with_config)
+    workflow.add_node("fuse_policy", fuse_policy_with_config)
+    workflow.add_node("generate_llm_report", generate_llm_report_with_config)
     
     # Set entry point
     workflow.set_entry_point("ingest_video")
@@ -150,21 +226,57 @@ def build_stable_graph() -> StateGraph:
     workflow.add_edge("fuse_policy", "generate_llm_report")
     workflow.add_edge("generate_llm_report", END)
     
-    logger.info("Built stable graph: ingest -> segment -> run_pipeline -> fuse_policy -> llm_report -> END")
+    return workflow
+
+
+# Cached compiled graphs
+_graph_no_checkpoint = None
+_graph_with_async_checkpoint = None
+
+
+def get_graph_without_checkpointing():
+    """Get compiled graph without checkpointing (for simple runs)."""
+    global _graph_no_checkpoint
+    if _graph_no_checkpoint is None:
+        workflow = build_graph_workflow()
+        _graph_no_checkpoint = workflow.compile()
+        logger.info("Built graph without checkpointing")
+    return _graph_no_checkpoint
+
+
+async def get_graph_with_checkpointing():
+    """
+    Get compiled graph with async PostgreSQL checkpointing.
     
-    return workflow.compile()
+    This enables:
+    - State persistence after each node
+    - Resume from any checkpoint
+    - Full state serialization
+    
+    Note: This is async because the checkpointer initialization is async.
+    """
+    global _graph_with_async_checkpoint
+    if _graph_with_async_checkpoint is None:
+        try:
+            from app.pipeline.checkpointer import get_async_checkpointer
+            
+            workflow = build_graph_workflow()
+            checkpointer = await get_async_checkpointer()
+            _graph_with_async_checkpoint = workflow.compile(checkpointer=checkpointer)
+            logger.info("Built graph with async PostgreSQL checkpointing")
+            
+        except Exception as e:
+            logger.warning(f"Failed to initialize async checkpointing, falling back to no checkpoint: {e}")
+            _graph_with_async_checkpoint = get_graph_without_checkpointing()
+    
+    return _graph_with_async_checkpoint
 
 
-# Cached compiled graph (singleton)
-_stable_graph = None
-
-
-def get_stable_graph() -> StateGraph:
-    """Get the cached stable graph (compile once, reuse)."""
-    global _stable_graph
-    if _stable_graph is None:
-        _stable_graph = build_stable_graph()
-    return _stable_graph
+def reset_graphs():
+    """Reset cached graphs (for testing)."""
+    global _graph_no_checkpoint, _graph_with_async_checkpoint
+    _graph_no_checkpoint = None
+    _graph_with_async_checkpoint = None
 
 
 # ===== MAIN ENTRY POINT =====
@@ -174,23 +286,29 @@ async def run_pipeline(
     criteria=None,
     video_id: str = None,
     progress_callback=None,
+    resume_from_checkpoint: bool = False,
 ) -> dict:
     """
-    Run the complete stable pipeline.
+    Run the complete pipeline with optional checkpointing.
     
     This is the main entry point for video evaluation.
-    Uses the stable graph with dynamic stage execution.
+    
+    Industry Standard:
+    - Callbacks passed via config["callbacks"]
+    - Criteria passed via config["configurable"]["evaluation_criteria"]
+    - State contains ONLY serializable data
     
     Args:
         video_path: Path to video file
         criteria: EvaluationCriteria object (or None for default)
-        video_id: Optional video ID for progress tracking
+        video_id: Optional video ID for progress tracking and checkpointing
         progress_callback: Optional async callback for progress updates
+        resume_from_checkpoint: If True and video_id has a checkpoint, resume from it
         
     Returns:
         Evaluation result dictionary
     """
-    logger.info(f"Starting pipeline for video: {video_path}")
+    logger.info(f"Starting pipeline for video: {video_path} (resume={resume_from_checkpoint})")
     
     # Default criteria
     if criteria is None:
@@ -216,12 +334,18 @@ async def run_pipeline(
                 {"stage": stage, "message": message, "progress": progress}
             )
     
-    # Initialize state
+    # Initialize state - ONLY serializable data (industry standard)
     initial_state = PipelineState(
         video_path=video_path,
         policy_config={},
-        progress_callback=wrapped_progress_callback,
         video_id=video_id,
+    )
+    
+    # Create config with callbacks and criteria (industry standard)
+    # Non-serializable items go in config, NOT state
+    config = create_pipeline_config(
+        video_id=video_id or "default",
+        progress_callback=wrapped_progress_callback,
         evaluation_criteria=criteria,
     )
     
@@ -230,9 +354,38 @@ async def run_pipeline(
     tracker.start("total")
     
     try:
-        # Get stable graph and run
-        graph = get_stable_graph()
-        final_state = await graph.ainvoke(initial_state)
+        # Use checkpointing if video_id is provided
+        if video_id:
+            graph = await get_graph_with_checkpointing()
+            # Merge thread_id into config (for checkpointing)
+            config["configurable"]["thread_id"] = video_id
+            
+            if resume_from_checkpoint:
+                # Resume from checkpoint - load existing state and merge
+                logger.info(f"Resuming from checkpoint for {video_id}")
+                
+                # Get existing checkpoint state
+                from app.pipeline.checkpointer import get_checkpoint_state
+                checkpoint_state = await get_checkpoint_state(video_id)
+                
+                if checkpoint_state:
+                    # Merge checkpoint state into initial state
+                    for key, value in checkpoint_state.items():
+                        if key not in initial_state or initial_state[key] is None:
+                            initial_state[key] = value
+                    
+                    logger.info(f"Loaded checkpoint with keys: {list(checkpoint_state.keys())[:10]}...")
+                else:
+                    logger.warning(f"No checkpoint found for {video_id}, running full pipeline")
+                
+                # Use a new thread_id for this reprocess run to avoid conflicts
+                config["configurable"]["thread_id"] = f"{video_id}_reprocess"
+            
+            final_state = await graph.ainvoke(initial_state, config)
+        else:
+            # No video_id - run without checkpointing
+            graph = get_graph_without_checkpointing()
+            final_state = await graph.ainvoke(initial_state, config)
         
         tracker.end("total")
         
@@ -245,8 +398,8 @@ async def run_pipeline(
             "evidence": final_state.get("evidence", {}),
             "report": final_state.get("report", ""),
             "transcript": {
-                "text": final_state.get("transcript", {}).get("full_text", ""),
-                "chunks": final_state.get("transcript", {}).get("chunks", [])
+                "text": final_state.get("transcript", {}).get("full_text", "") if isinstance(final_state.get("transcript"), dict) else "",
+                "chunks": final_state.get("transcript", {}).get("chunks", []) if isinstance(final_state.get("transcript"), dict) else []
             },
             "metadata": {
                 "video_id": video_id,
@@ -281,6 +434,30 @@ async def run_pipeline(
         }
 
 
+async def resume_pipeline(video_id: str, criteria=None) -> dict:
+    """
+    Resume a pipeline from its last checkpoint.
+    
+    This is a convenience wrapper for run_pipeline with resume=True.
+    """
+    from app.pipeline.checkpointer import get_checkpoint_state
+    
+    checkpoint_state = await get_checkpoint_state(video_id)
+    if not checkpoint_state:
+        raise ValueError(f"No checkpoint found for {video_id}")
+    
+    video_path = checkpoint_state.get("video_path")
+    if not video_path:
+        raise ValueError(f"Checkpoint for {video_id} has no video_path")
+    
+    return await run_pipeline(
+        video_path=video_path,
+        criteria=criteria,
+        video_id=video_id,
+        resume_from_checkpoint=True,
+    )
+
+
 def run_pipeline_sync(video_path: str, criteria=None, video_id: str = None) -> dict:
     """Run pipeline synchronously (for non-async contexts)."""
     try:
@@ -290,3 +467,8 @@ def run_pipeline_sync(video_path: str, criteria=None, video_id: str = None) -> d
         asyncio.set_event_loop(loop)
     
     return loop.run_until_complete(run_pipeline(video_path, criteria, video_id))
+
+
+# Legacy aliases for backward compatibility
+get_stable_graph = get_graph_without_checkpointing
+build_stable_graph = build_graph_workflow

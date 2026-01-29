@@ -7,6 +7,7 @@ This is the core orchestration layer that:
 - Executes stages in order
 - Manages state updates and progress callbacks
 - Handles errors consistently
+- Tracks skipped stages explicitly
 
 The runner is called from within a single LangGraph node (run_pipeline),
 keeping the LangGraph structure stable while allowing dynamic stage execution.
@@ -16,7 +17,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
-from app.pipeline.stages.base import StageSpec, StageStatus
+from app.pipeline.stages.base import StageSpec, StageStatus, StageImpact
 from app.pipeline.stages.registry import get_stage_registry
 from app.core.logging import get_logger
 
@@ -34,6 +35,8 @@ class StageRun:
     duration_ms: float = 0.0
     outputs: Dict[str, Any] = field(default_factory=dict)
     error: Optional[str] = None
+    skip_reason: Optional[str] = None  # If skipped, why
+    impact: str = "supporting"  # Stage impact level
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -42,6 +45,8 @@ class StageRun:
             "status": self.status.value,
             "duration_ms": self.duration_ms,
             "error": self.error,
+            "skip_reason": self.skip_reason,
+            "impact": self.impact,
         }
 
 
@@ -120,19 +125,45 @@ class PipelineRunner:
         logger.info(f"Starting pipeline with {total_stages} stages")
         
         for idx, spec in enumerate(stages):
-            if not spec.enabled:
-                logger.info(f"Skipping disabled stage: {spec.id}")
-                continue
-            
             # Calculate overall progress
             base_progress = int((idx / total_stages) * 100)
             stage_progress = int(((idx + 1) / total_stages) * 100)
+            
+            # Handle disabled stages explicitly - record them as SKIPPED
+            if not spec.enabled:
+                skip_reason = spec.skip_reason or "Disabled by configuration"
+                logger.info(f"Skipping disabled stage: {spec.id} ({skip_reason})")
+                
+                skipped_run = StageRun(
+                    stage_id=spec.id,
+                    stage_type=spec.type,
+                    status=StageStatus.SKIPPED,
+                    started_at=time.time(),
+                    ended_at=time.time(),
+                    duration_ms=0.0,
+                    skip_reason=skip_reason,
+                    impact=spec.impact.value if isinstance(spec.impact, StageImpact) else spec.impact,
+                )
+                stage_runs.append(skipped_run)
+                
+                # Save skipped stage output for UI visibility
+                video_id = state.get("video_id")
+                if video_id:
+                    from app.utils.progress import save_stage_output
+                    save_stage_output(video_id, spec.id, {
+                        "status": "skipped",
+                        "skip_reason": skip_reason,
+                        "impact": spec.impact.value if isinstance(spec.impact, StageImpact) else spec.impact,
+                    })
+                
+                continue
             
             run = StageRun(
                 stage_id=spec.id,
                 stage_type=spec.type,
                 status=StageStatus.RUNNING,
                 started_at=time.time(),
+                impact=spec.impact.value if isinstance(spec.impact, StageImpact) else spec.impact,
             )
             
             try:
@@ -150,6 +181,10 @@ class PipelineRunner:
                 state["current_stage"] = spec.type
                 state["stage_progress"] = 0
                 
+                # Inject progress_callback for plugins (not saved in state for checkpoint)
+                # This is a runtime-only value
+                state["progress_callback"] = self.progress_callback
+                
                 # Validate state
                 validation_error = plugin.validate_state(state, spec)
                 if validation_error:
@@ -163,9 +198,27 @@ class PipelineRunner:
                 if isinstance(updated_state, dict):
                     state.update(updated_state)
                 
-                # Get stage output for tracking (nodes already save their own outputs)
+                # Get stage output for tracking
                 stage_output = plugin.get_stage_output(state)
                 run.outputs = stage_output
+                
+                # For external stages, save output to database 
+                # (builtin stages save their own outputs via save_stage_output)
+                video_id = state.get("video_id")
+                if video_id and stage_output:
+                    # Check if this is an external stage (has external stage metadata)
+                    is_external = f"external_stage_{spec.id}" in state
+                    if is_external:
+                        from app.utils.progress import save_stage_output, format_stage_output
+                        # Format and save external stage output
+                        formatted_output = format_stage_output(
+                            spec.id,
+                            is_external=True,
+                            endpoint_called=True,
+                            **{k: v for k, v in stage_output.items() if not k.startswith('_')}
+                        )
+                        save_stage_output(video_id, spec.id, formatted_output)
+                        logger.info(f"Saved external stage output for {spec.id}")
                 
                 # Mark complete
                 run.status = StageStatus.COMPLETED
@@ -218,6 +271,9 @@ class PipelineRunner:
         # Store stage runs in state for later reference
         state["stage_runs"] = [r.to_dict() for r in stage_runs]
         
+        # Remove non-serializable items before returning (for checkpointing)
+        state.pop("progress_callback", None)
+        
         logger.info(
             f"Pipeline complete: {len(stage_runs)} stages, "
             f"{sum(1 for r in stage_runs if r.status == StageStatus.COMPLETED)} succeeded, "
@@ -251,6 +307,27 @@ class PipelineRunner:
             logger.warning(f"Progress callback failed: {e}")
 
 
+def load_stage_settings() -> Dict[str, Dict[str, Any]]:
+    """Load stage settings from database for all stages."""
+    settings_map = {}
+    try:
+        from app.db.connection import get_db_session
+        from app.db.models import StageSettings
+        
+        with get_db_session() as session:
+            all_settings = session.query(StageSettings).all()
+            for s in all_settings:
+                settings_map[s.id] = {
+                    "enabled": s.enabled,
+                    "impact": s.impact,
+                    "required": s.required,
+                }
+    except Exception as e:
+        logger.warning(f"Could not load stage settings: {e}")
+    
+    return settings_map
+
+
 def build_pipeline_from_detectors(detector_ids: List[str]) -> List[StageSpec]:
     """
     Build a pipeline definition from a list of detector IDs.
@@ -264,13 +341,30 @@ def build_pipeline_from_detectors(detector_ids: List[str]) -> List[StageSpec]:
     Returns:
         List of StageSpec objects
     """
+    # Load settings to apply enable/disable state
+    settings_map = load_stage_settings()
+    
     stages = []
     for detector_id in detector_ids:
-        stages.append(StageSpec(
+        settings = settings_map.get(detector_id, {})
+        enabled = settings.get("enabled", True)
+        impact_str = settings.get("impact", "supporting")
+        
+        # Convert impact string to enum
+        try:
+            impact = StageImpact(impact_str)
+        except ValueError:
+            impact = StageImpact.SUPPORTING
+        
+        stage = StageSpec(
             type=detector_id,
             id=detector_id,
-            enabled=True,
-        ))
+            enabled=enabled,
+            impact=impact,
+            required=settings.get("required", False),
+            skip_reason="Disabled by user" if not enabled else None,
+        )
+        stages.append(stage)
     return stages
 
 
@@ -281,26 +375,102 @@ def build_pipeline_from_criteria(criteria) -> List[StageSpec]:
     If criteria has an explicit pipeline definition, use it.
     Otherwise, use auto-routing to determine stages.
     
+    External stages (YAML-defined) are automatically appended after
+    the auto-routed stages if they are enabled.
+    
+    Stage enable/disable state is loaded from database.
+    
     Args:
         criteria: EvaluationCriteria object
         
     Returns:
         List of StageSpec objects
     """
+    # Load settings to apply enable/disable state
+    settings_map = load_stage_settings()
+    
     # Check for explicit pipeline definition
     if hasattr(criteria, 'pipeline') and criteria.pipeline:
         # criteria.pipeline is a list of stage definitions
-        return [
-            StageSpec(
-                type=stage.get("type"),
-                id=stage.get("id", stage.get("type")),
-                enabled=stage.get("enabled", True),
-                config=stage.get("config", {}),
-            )
-            for stage in criteria.pipeline
-        ]
+        stages = []
+        for stage_def in criteria.pipeline:
+            stage_type = stage_def.get("type")
+            settings = settings_map.get(stage_type, {})
+            enabled = settings.get("enabled", stage_def.get("enabled", True))
+            
+            # Convert impact string to enum
+            impact_str = settings.get("impact", "supporting")
+            try:
+                impact = StageImpact(impact_str)
+            except ValueError:
+                impact = StageImpact.SUPPORTING
+            
+            stages.append(StageSpec(
+                type=stage_type,
+                id=stage_def.get("id", stage_type),
+                enabled=enabled,
+                impact=impact,
+                required=settings.get("required", False),
+                config=stage_def.get("config", {}),
+                skip_reason="Disabled by user" if not enabled else None,
+            ))
+    else:
+        # Fall back to auto-routing
+        from app.evaluation.routing import route_criteria_to_detectors
+        detector_ids = route_criteria_to_detectors(criteria)
+        stages = build_pipeline_from_detectors(detector_ids)
     
-    # Fall back to auto-routing
-    from app.evaluation.routing import route_criteria_to_detectors
-    detector_ids = route_criteria_to_detectors(criteria)
-    return build_pipeline_from_detectors(detector_ids)
+    # Log builtin stages before external
+    enabled_builtin = [s.type for s in stages if s.enabled]
+    disabled_builtin = [s.type for s in stages if not s.enabled]
+    logger.info(f"Built {len(stages)} builtin stages: {len(enabled_builtin)} enabled, {len(disabled_builtin)} disabled")
+    if disabled_builtin:
+        logger.info(f"Disabled stages: {disabled_builtin}")
+    
+    # Append enabled external stages
+    try:
+        from app.external_stages import get_external_stage_registry
+        ext_registry = get_external_stage_registry()
+        
+        external_stages = ext_registry.list_stages()
+        logger.info(f"Found {len(external_stages)} external stage configs")
+        
+        for ext_config in external_stages:
+            # Check both external config enabled and stage settings enabled
+            settings = settings_map.get(ext_config.id, {})
+            config_enabled = ext_config.enabled
+            settings_enabled = settings.get("enabled", True)
+            is_enabled = config_enabled and settings_enabled
+            
+            logger.info(f"External stage '{ext_config.id}': config={config_enabled}, settings={settings_enabled}, final={is_enabled}")
+            
+            # Convert impact string to enum
+            impact_str = settings.get("impact", "advisory")
+            try:
+                impact = StageImpact(impact_str)
+            except ValueError:
+                impact = StageImpact.ADVISORY
+            
+            # Add external stage to pipeline (even if disabled, for tracking)
+            stages.append(StageSpec(
+                type=ext_config.id,
+                id=ext_config.id,
+                enabled=is_enabled,
+                impact=impact,
+                required=False,  # External stages are never required
+                config={},
+                skip_reason="Disabled by user" if not is_enabled else None,
+            ))
+            
+            if is_enabled:
+                logger.info(f"✓ Added external stage to pipeline: {ext_config.id}")
+            else:
+                logger.info(f"○ External stage will be skipped: {ext_config.id}")
+                
+    except Exception as e:
+        logger.warning(f"Could not load external stages: {e}", exc_info=True)
+    
+    enabled_count = sum(1 for s in stages if s.enabled)
+    disabled_count = sum(1 for s in stages if not s.enabled)
+    logger.info(f"Final pipeline: {len(stages)} stages ({enabled_count} enabled, {disabled_count} disabled)")
+    return stages

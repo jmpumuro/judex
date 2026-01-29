@@ -5,51 +5,50 @@ This is the bridge between the stable LangGraph structure and the
 dynamic stage execution system. All detector stages run inside
 this single node, keeping the main graph stable.
 
+Industry Standard: Uses LangGraph config for callbacks and criteria.
+
 Graph structure becomes:
   ingest -> segment -> run_pipeline -> fuse_policy -> llm_report -> END
                          └── (dynamic stages via PipelineRunner)
 """
 import asyncio
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+from langchain_core.runnables import RunnableConfig
 
 from app.pipeline.state import PipelineState
 from app.pipeline.runner import PipelineRunner, build_pipeline_from_criteria
+from app.pipeline.callbacks import get_progress_callback, get_evaluation_criteria, send_progress
 from app.core.logging import get_logger
-from app.utils.progress import send_progress
 
 logger = get_logger("node.run_pipeline")
 
 
-def run_pipeline_node(state: PipelineState) -> PipelineState:
+def run_pipeline_node_impl(state: PipelineState, config: Optional[RunnableConfig] = None) -> PipelineState:
     """
     LangGraph node that runs detector stages dynamically.
     
+    Industry Standard: Receives config parameter for callbacks and criteria.
+    - Callbacks from config["callbacks"]
+    - Criteria from config["configurable"]["evaluation_criteria"]
+    
     This node:
-    1. Reads evaluation_criteria from state
+    1. Reads evaluation_criteria from config (not state)
     2. Builds a pipeline plan (from criteria.pipeline or auto-routing)
     3. Executes stages via PipelineRunner
     4. Returns updated state with all detector outputs
-    
-    Args:
-        state: Current pipeline state (must have evaluation_criteria)
-        
-    Returns:
-        Updated state with detector outputs merged in
     """
     logger.info("=== Run Pipeline Node ===")
     
-    send_progress(
-        state.get("progress_callback"),
-        "run_pipeline",
-        "Starting detector pipeline",
-        25
-    )
+    # Get progress callback from config (industry standard)
+    progress_handler = get_progress_callback(config)
+    progress_callback = progress_handler.send_progress_sync if progress_handler else None
     
-    # Get criteria for routing
-    criteria = state.get("evaluation_criteria")
+    send_progress(config, "run_pipeline", "Starting detector pipeline", 25)
+    
+    # Get criteria from config (industry standard - not from state)
+    criteria = get_evaluation_criteria(config)
     if not criteria:
-        # Fallback to default child_safety criteria
-        logger.warning("No evaluation_criteria in state, using defaults")
+        logger.warning("No evaluation_criteria in config, using defaults")
         from app.evaluation.criteria import CHILD_SAFETY_CRITERIA
         criteria = CHILD_SAFETY_CRITERIA
     
@@ -62,20 +61,17 @@ def run_pipeline_node(state: PipelineState) -> PipelineState:
         return state
     
     # Create runner with progress callback
+    # Note: We pass the raw callback function, not the handler
     runner = PipelineRunner(
-        progress_callback=state.get("progress_callback"),
+        progress_callback=progress_callback,
         video_id=state.get("video_id"),
-        stop_on_error=False,  # Continue on errors, collect all results
+        stop_on_error=False,
     )
     
-    # Run the pipeline (sync wrapper for async runner)
-    # The runner's stages are async, but LangGraph nodes are sync
-    # We need to run the async runner in an event loop
+    # Run the pipeline
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            # We're already in an async context (e.g., from ainvoke)
-            # Create a new task
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 future = executor.submit(
@@ -86,7 +82,6 @@ def run_pipeline_node(state: PipelineState) -> PipelineState:
         else:
             result = loop.run_until_complete(runner.run(stages, dict(state)))
     except RuntimeError:
-        # No event loop - create one
         result = asyncio.run(runner.run(stages, dict(state)))
     
     # Merge results back into state
@@ -103,36 +98,38 @@ def run_pipeline_node(state: PipelineState) -> PipelineState:
     if result.errors:
         logger.warning(f"Pipeline errors: {result.errors}")
     
-    send_progress(
-        state.get("progress_callback"),
-        "run_pipeline",
-        f"Detector pipeline complete ({successful} stages)",
-        75
-    )
+    send_progress(config, "run_pipeline", f"Detector pipeline complete ({successful} stages)", 75)
     
     return state
 
 
-async def run_pipeline_node_async(state: PipelineState) -> PipelineState:
+# Legacy wrapper for backward compatibility
+def run_pipeline_node(state: PipelineState) -> PipelineState:
+    """Legacy wrapper - calls impl without config."""
+    return run_pipeline_node_impl(state, None)
+
+
+async def run_pipeline_node_async(state: PipelineState, config: Optional[RunnableConfig] = None) -> PipelineState:
     """
     Async version of run_pipeline_node for direct async invocation.
-    
-    Use this when calling from an async context outside of LangGraph,
-    or when the graph is compiled with async support.
     """
     logger.info("=== Run Pipeline Node (Async) ===")
     
-    # Get criteria
-    criteria = state.get("evaluation_criteria")
+    # Get criteria from config
+    criteria = get_evaluation_criteria(config)
     if not criteria:
         from app.evaluation.criteria import CHILD_SAFETY_CRITERIA
         criteria = CHILD_SAFETY_CRITERIA
+    
+    # Get progress callback from config
+    progress_handler = get_progress_callback(config)
+    progress_callback = progress_handler.send_progress_sync if progress_handler else None
     
     # Build and run pipeline
     stages = build_pipeline_from_criteria(criteria)
     
     runner = PipelineRunner(
-        progress_callback=state.get("progress_callback"),
+        progress_callback=progress_callback,
         video_id=state.get("video_id"),
         stop_on_error=False,
     )

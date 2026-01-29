@@ -98,6 +98,54 @@ export interface CriteriaDetails {
   is_preset: boolean
 }
 
+// ===== STAGE TYPES =====
+
+export interface StageInfo {
+  type: string
+  display_name: string
+  description?: string
+  is_external: boolean
+  is_builtin: boolean
+  enabled: boolean
+  impact: 'critical' | 'supporting' | 'advisory'
+  required: boolean
+  input_keys: string[]
+  output_keys: string[]
+  display_color?: string
+  icon?: string
+  endpoint_url?: string
+  last_toggled_at?: string
+  toggle_reason?: string
+}
+
+export interface ToggleStageResponse {
+  stage_id: string
+  enabled: boolean
+  was_enabled: boolean
+  impact: string
+  required: boolean
+  warning?: string
+}
+
+export interface ExternalStageConfig {
+  id: string
+  name: string
+  description?: string
+  yaml_content: string
+  stage_ids: string[]
+  enabled: boolean
+  validated: boolean
+  validation_error?: string
+  created_at?: string
+  updated_at?: string
+}
+
+export interface ValidationResult {
+  valid: boolean
+  error?: string
+  stages: { id: string; name: string; endpoint: string }[]
+}
+
 // ===== EVALUATION API =====
 
 export const evaluationApi = {
@@ -156,6 +204,21 @@ export const evaluationApi = {
    */
   delete: async (evaluationId: string): Promise<void> => {
     await api.delete(`/evaluations/${evaluationId}`)
+  },
+
+  /**
+   * Reprocess an evaluation with current stage settings
+   */
+  reprocess: async (evaluationId: string, skipEarlyStages: boolean = true): Promise<{
+    status: string
+    evaluation_id: string
+    items_count: number
+    skip_early_stages: boolean
+  }> => {
+    const { data } = await api.post(`/evaluations/${evaluationId}/reprocess`, null, {
+      params: { skip_early_stages: skipEarlyStages }
+    })
+    return data
   },
 
   /**
@@ -292,6 +355,89 @@ export const criteriaApi = {
   delete: async (criteriaId: string): Promise<void> => {
     await api.delete(`/criteria/custom/${criteriaId}`)
   }
+}
+
+// ===== STAGES API =====
+
+export const stagesApi = {
+  /**
+   * List all available stages (builtin + external)
+   */
+  list: async (): Promise<{ stages: StageInfo[]; builtin_count: number; external_count: number }> => {
+    const { data } = await api.get('/stages')
+    return data
+  },
+
+  /**
+   * List external stage configurations
+   */
+  listExternal: async (): Promise<ExternalStageConfig[]> => {
+    const { data } = await api.get<ExternalStageConfig[]>('/stages/external')
+    return data
+  },
+
+  /**
+   * Create or update external stage config
+   */
+  createExternal: async (config: {
+    id: string
+    name: string
+    description?: string
+    yaml_content: string
+    enabled?: boolean
+  }): Promise<ExternalStageConfig> => {
+    const { data } = await api.post<ExternalStageConfig>('/stages/external', config)
+    return data
+  },
+
+  /**
+   * Get external stage config by ID
+   */
+  getExternal: async (configId: string): Promise<ExternalStageConfig> => {
+    const { data } = await api.get<ExternalStageConfig>(`/stages/external/${configId}`)
+    return data
+  },
+
+  /**
+   * Delete external stage config
+   */
+  deleteExternal: async (configId: string): Promise<void> => {
+    await api.delete(`/stages/external/${configId}`)
+  },
+
+  /**
+   * Validate YAML without saving
+   */
+  validateYaml: async (yaml_content: string): Promise<ValidationResult> => {
+    const { data } = await api.post<ValidationResult>('/stages/external/validate', { yaml_content })
+    return data
+  },
+
+  /**
+   * Toggle external config enabled/disabled
+   */
+  toggleExternal: async (configId: string, enabled: boolean): Promise<void> => {
+    await api.post(`/stages/external/${configId}/toggle`, { enabled })
+  },
+
+  /**
+   * Toggle any stage (builtin or external)
+   */
+  toggleStage: async (stageId: string, enabled: boolean, reason?: string): Promise<ToggleStageResponse> => {
+    const { data } = await api.post<ToggleStageResponse>(`/stages/${stageId}/toggle`, { 
+      enabled,
+      reason 
+    })
+    return data
+  },
+
+  /**
+   * Get all stage settings (for debugging/admin)
+   */
+  getSettings: async (): Promise<{ settings: any[]; count: number }> => {
+    const { data } = await api.get('/stages/settings')
+    return data
+  },
 }
 
 // ===== LIVE FEED API =====

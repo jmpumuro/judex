@@ -1,0 +1,53 @@
+# Example External Stage Configuration for Judex
+# 
+# This YAML defines a custom pipeline stage that calls an external HTTP endpoint.
+# The mock service runs on localhost:8099 (see scripts/mock_external_service.py)
+#
+# To use:
+# 1. Start the mock service: python scripts/mock_external_service.py
+# 2. Go to Settings > External Stages in Judex UI
+# 3. Paste this YAML and save
+# 4. Run an evaluation - you'll see the external stage in the pipeline
+
+version: v1
+
+stages:
+  - id: custom_policy_check
+    name: "Custom Policy Check"
+    type: external_stage
+    description: "Checks video against custom brand safety and compliance policies"
+    
+    endpoint:
+      url: "http://localhost:8099/analyze"
+      method: POST
+      auth:
+        type: bearer
+        token: "test-token-12345"
+      headers:
+        X-Custom-Header: "judex-integration"
+    
+    # Timeout and retry configuration
+    timeout_ms: 10000
+    retries: 2
+    retry_delay_ms: 500
+    
+    # Map pipeline state to request payload
+    # Format: "request_field": "$.pipeline.state.path"
+    input_mapping:
+      vision_data: "$.vision_detections"
+      transcript: "$.transcript.full_text"
+      video_id: "$.video_id"
+      metadata: "$.original_metadata"
+    
+    # Map response to pipeline state updates
+    # Format: "state_key": "$.response.path"
+    output_mapping:
+      custom_verdict: "$.verdict"
+      custom_violations: "$.violations"
+      custom_score: "$.custom_score"
+      custom_confidence: "$.confidence"
+    
+    # UI customization
+    display_color: "#8B5CF6"  # Purple
+    icon: "shield-check"
+    enabled: true

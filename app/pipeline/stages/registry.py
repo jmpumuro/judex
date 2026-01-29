@@ -72,22 +72,57 @@ class StageRegistry:
         Raises:
             KeyError: If stage type not registered
         """
-        if stage_type not in self._stages:
-            available = ", ".join(sorted(self._stages.keys()))
-            raise KeyError(
-                f"Unknown stage type: '{stage_type}'. "
-                f"Available stages: {available}"
-            )
+        # Check builtin stages first
+        if stage_type in self._stages:
+            # Lazy instantiation with caching
+            if stage_type not in self._instances:
+                self._instances[stage_type] = self._stages[stage_type]()
+            return self._instances[stage_type]
         
-        # Lazy instantiation with caching
+        # Check external stages
         if stage_type not in self._instances:
-            self._instances[stage_type] = self._stages[stage_type]()
+            try:
+                from app.external_stages import get_external_stage_registry, ExternalHttpStagePlugin
+                ext_registry = get_external_stage_registry()
+                ext_config = ext_registry.get_config(stage_type)
+                
+                if ext_config:
+                    # Parse the YAML to get the stage definition
+                    from app.external_stages.schema import parse_stage_yaml
+                    parsed = parse_stage_yaml(ext_config.yaml_content)
+                    
+                    if parsed and parsed.stages:
+                        # Find the matching stage definition
+                        for stage_def in parsed.stages:
+                            if stage_def.id == stage_type:
+                                plugin = ExternalHttpStagePlugin(stage_def)
+                                self._instances[stage_type] = plugin
+                                logger.info(f"Created external stage plugin: {stage_type}")
+                                break
+            except Exception as e:
+                logger.warning(f"Failed to load external stage '{stage_type}': {e}")
         
-        return self._instances[stage_type]
+        if stage_type in self._instances:
+            return self._instances[stage_type]
+        
+        available = ", ".join(sorted(self._stages.keys()))
+        raise KeyError(
+            f"Unknown stage type: '{stage_type}'. "
+            f"Available stages: {available}"
+        )
     
     def has(self, stage_type: str) -> bool:
-        """Check if a stage type is registered."""
-        return stage_type in self._stages
+        """Check if a stage type is registered (including external stages)."""
+        if stage_type in self._stages:
+            return True
+        
+        # Check external stages
+        try:
+            from app.external_stages import get_external_stage_registry
+            ext_registry = get_external_stage_registry()
+            return ext_registry.has_config(stage_type)
+        except Exception:
+            return False
     
     def list_stages(self) -> List[str]:
         """List all registered stage types."""

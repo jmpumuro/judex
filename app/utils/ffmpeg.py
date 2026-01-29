@@ -125,7 +125,7 @@ def normalize_video(
     output_path: str,
     audio_path: str,
     target_fps: int = 30,
-    target_height: int = 720
+    target_height: int = 480  # Reduced from 720 to save memory
 ) -> bool:
     """
     Normalize video to consistent format for downstream models.
@@ -135,7 +135,7 @@ def normalize_video(
         output_path: Normalized video output path
         audio_path: Extracted audio output path (mono 16kHz WAV)
         target_fps: Target frame rate (default 30)
-        target_height: Target height while preserving aspect ratio (default 720)
+        target_height: Target height while preserving aspect ratio (default 480)
     
     Returns:
         True if successful, False otherwise
@@ -145,20 +145,22 @@ def normalize_video(
         # - Constant FPS
         # - Scale to target height, preserve aspect ratio
         # - Re-encode with consistent codec
+        # - Use ultrafast preset and single thread to minimize memory
         video_cmd = [
             "ffmpeg",
+            "-threads", "1",  # Single thread to reduce memory
             "-i", input_path,
             "-vf", f"fps={target_fps},scale=-2:{target_height}",  # -2 ensures width is even
             "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "23",
+            "-preset", "ultrafast",  # Faster, less memory
+            "-crf", "28",  # Lower quality to reduce memory
             "-an",  # No audio in video file
             "-y",
             output_path
         ]
         
-        logger.info(f"Normalizing video: {target_fps}fps, {target_height}p")
-        result = subprocess.run(video_cmd, capture_output=True, text=True)
+        logger.info(f"Normalizing video: {target_fps}fps, {target_height}p (memory-optimized)")
+        result = subprocess.run(video_cmd, capture_output=True, text=True, timeout=120)  # 2 min timeout
         
         if result.returncode != 0:
             logger.error(f"Video normalization failed: {result.stderr}")

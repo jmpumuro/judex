@@ -86,10 +86,9 @@ const LiveEvents: FC = () => {
         <span className="text-xs text-gray-500 tracking-widest">LIVE EVENTS</span>
       </div>
 
-      {/* Content */}
-      <div className="flex-1 overflow-y-auto p-4">
-        {/* Filters */}
-        <div className="bg-gray-900 border border-gray-800 p-4 mb-6">
+      {/* Filters - Fixed */}
+      <div className="flex-shrink-0 p-4 pb-0">
+        <div className="bg-gray-900 border border-gray-800 p-4">
           <div className="flex flex-wrap gap-4 items-end">
             <div className="flex-1 min-w-[200px]">
               <label className="block text-xs text-gray-500 uppercase tracking-wider mb-2">Filter by Severity</label>
@@ -136,9 +135,11 @@ const LiveEvents: FC = () => {
             </div>
           </div>
         </div>
-        
-        {/* Stats */}
-        <div className="grid grid-cols-4 gap-4 mb-6">
+      </div>
+      
+      {/* Stats - Fixed */}
+      <div className="flex-shrink-0 p-4">
+        <div className="grid grid-cols-4 gap-4">
           <div className="bg-gray-900 border border-gray-800 p-4 text-center">
             <div className="text-3xl font-light mb-1">{stats.total}</div>
             <div className="text-xs text-gray-500 uppercase tracking-wider">Total Events</div>
@@ -156,15 +157,17 @@ const LiveEvents: FC = () => {
             <div className="text-xs text-gray-500 uppercase tracking-wider">Avg Violence</div>
           </div>
         </div>
-        
-        {/* Events Table */}
-        <div className="bg-gray-900 border border-gray-800">
-          <div className="p-4 border-b border-gray-800 flex items-center justify-between">
+      </div>
+      
+      {/* Events Table - Scrollable */}
+      <div className="flex-1 overflow-hidden px-4 pb-4">
+        <div className="h-full bg-gray-900 border border-gray-800 flex flex-col">
+          <div className="p-4 border-b border-gray-800 flex items-center justify-between flex-shrink-0">
             <h2 className="text-sm font-semibold tracking-wider">CAPTURED EVENTS</h2>
             <span className="text-sm text-gray-500">{filteredEvents.length} events</span>
           </div>
           
-          <div className="overflow-x-auto">
+          <div className="flex-1 overflow-y-auto">
             <table className="w-full">
               <thead>
                 <tr className="border-b border-gray-800 text-left text-xs text-gray-500 uppercase">

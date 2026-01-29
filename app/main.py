@@ -20,6 +20,7 @@ from app.api.routes import router as utility_router
 from app.api.evaluations import router as evaluation_router
 from app.api.live import router as live_router
 from app.api.criteria_routes import router as criteria_router
+from app.api.stages_routes import router as stages_router
 from app.core.config import settings
 from app.core.logging import get_logger
 
@@ -64,6 +65,18 @@ def init_storage():
         logger.warning("File storage will fall back to local filesystem")
 
 
+def init_external_stages():
+    """Load external stage configurations from database."""
+    try:
+        from app.external_stages.registry import load_external_stages_from_db
+        logger.info("Loading external stage configurations...")
+        load_external_stages_from_db()
+        logger.info("✓ External stages loaded")
+    except Exception as e:
+        logger.warning(f"Could not load external stages: {e}")
+        logger.info("External stages can be configured via Settings")
+
+
 def preload_models():
     """Pre-load all models at startup using the model registry (singletons)."""
     import threading
@@ -96,6 +109,9 @@ async def lifespan(app: FastAPI):
     # Initialize MinIO storage
     init_storage()
     
+    # Load external stages from database
+    init_external_stages()
+    
     # Pre-load models in background to warm up
     preload_models()
     
@@ -126,6 +142,7 @@ app.add_middleware(
 # Primary API - all new code should use these
 app.include_router(evaluation_router)  # /v1/evaluate, /v1/evaluations/*
 app.include_router(criteria_router)    # /v1/criteria/*
+app.include_router(stages_router)      # /v1/stages/*
 app.include_router(live_router, prefix=settings.api_prefix)  # /v1/live/*
 
 # ===== Utility Routes =====
