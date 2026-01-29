@@ -24,7 +24,7 @@ class YoloWorldStagePlugin(StagePlugin):
     
     @property
     def display_name(self) -> str:
-        return "YOLO-World Detection"
+        return "Scene Analysis"
     
     @property
     def input_keys(self) -> Set[str]:

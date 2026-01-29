@@ -24,7 +24,7 @@ class TextModerationStagePlugin(StagePlugin):
     
     @property
     def display_name(self) -> str:
-        return "Text Moderation"
+        return "Content Filter"
     
     @property
     def input_keys(self) -> Set[str]:

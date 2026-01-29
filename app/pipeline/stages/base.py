@@ -122,6 +122,18 @@ class StagePlugin(ABC):
         return self.stage_type.replace("_", " ").title()
     
     @property
+    def is_external(self) -> bool:
+        """
+        Whether this is an external stage (calls external HTTP endpoint).
+        
+        External stages need special handling for output persistence since
+        they don't use the builtin save_stage_output in their node code.
+        
+        Default is False for builtin stages. External plugins override to True.
+        """
+        return False
+    
+    @property
     def input_keys(self) -> Set[str]:
         """
         State keys this stage requires as input.

@@ -45,6 +45,11 @@ class ExternalHttpStagePlugin(StagePlugin):
         return self._stage_type
     
     @property
+    def is_external(self) -> bool:
+        """External HTTP stages return True - used by runner for output persistence."""
+        return True
+    
+    @property
     def display_name(self) -> str:
         return self._config.name
     

@@ -28,17 +28,17 @@ interface CriteriaPreset {
 }
 
 // PipelineStage interface imported from PipelineStages component
-// Default builtin stages
+// Default builtin stages - User-friendly names that showcase value
 const DEFAULT_PIPELINE_STAGES: PipelineStage[] = [
-  { id: 'ingest_video', backendId: 'ingest', name: 'Ingest', number: '01' },
-  { id: 'segment_video', backendId: 'segment', name: 'Segment', number: '02' },
-  { id: 'yolo26_vision', backendId: 'yolo26', name: 'Vision', number: '03' },
-  { id: 'yoloworld_vision', backendId: 'yoloworld', name: 'YOLO-W', number: '04' },
-  { id: 'violence_detection', backendId: 'violence', name: 'Violence', number: '05' },
-  { id: 'audio_transcription', backendId: 'audio_asr', name: 'Audio', number: '06' },
-  { id: 'ocr_extraction', backendId: 'ocr', name: 'OCR', number: '07' },
-  { id: 'text_moderation', backendId: 'text_moderation', name: 'Moderate', number: '08' },
-  { id: 'policy_fusion', backendId: 'policy_fusion', name: 'Scoring', number: '09' },
+  { id: 'ingest_video', backendId: 'ingest', name: 'Upload', number: '01' },
+  { id: 'segment_video', backendId: 'segment', name: 'Extract', number: '02' },
+  { id: 'yolo26_vision', backendId: 'yolo26', name: 'Detect', number: '03' },
+  { id: 'yoloworld_vision', backendId: 'yoloworld', name: 'Scan', number: '04' },
+  { id: 'violence_detection', backendId: 'violence', name: 'Threats', number: '05' },
+  { id: 'audio_transcription', backendId: 'audio_asr', name: 'Speech', number: '06' },
+  { id: 'ocr_extraction', backendId: 'ocr', name: 'Text', number: '07' },
+  { id: 'text_moderation', backendId: 'text_moderation', name: 'Filter', number: '08' },
+  { id: 'policy_fusion', backendId: 'policy_fusion', name: 'Score', number: '09' },
   { id: 'report_generation', backendId: 'report', name: 'Report', number: '10' },
 ]
 

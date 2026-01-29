@@ -24,7 +24,7 @@ class WhisperStagePlugin(StagePlugin):
     
     @property
     def display_name(self) -> str:
-        return "Audio Transcription (Whisper)"
+        return "Speech Analysis"
     
     @property
     def input_keys(self) -> Set[str]:

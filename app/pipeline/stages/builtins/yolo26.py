@@ -24,7 +24,7 @@ class Yolo26StagePlugin(StagePlugin):
     
     @property
     def display_name(self) -> str:
-        return "YOLO26 Object Detection"
+        return "Object Detection"
     
     @property
     def input_keys(self) -> Set[str]:

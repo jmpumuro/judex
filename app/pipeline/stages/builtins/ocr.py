@@ -24,7 +24,7 @@ class OcrStagePlugin(StagePlugin):
     
     @property
     def display_name(self) -> str:
-        return "Text Extraction (OCR)"
+        return "Text Recognition"
     
     @property
     def input_keys(self) -> Set[str]:

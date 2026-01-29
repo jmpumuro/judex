@@ -24,7 +24,7 @@ class ViolenceStagePlugin(StagePlugin):
     
     @property
     def display_name(self) -> str:
-        return "Violence Detection (X-CLIP)"
+        return "Threat Detection"
     
     @property
     def input_keys(self) -> Set[str]:

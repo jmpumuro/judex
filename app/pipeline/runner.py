@@ -206,10 +206,12 @@ class PipelineRunner:
                 # (builtin stages save their own outputs via save_stage_output)
                 video_id = state.get("video_id")
                 if video_id and stage_output:
-                    # Check if this is an external stage (has external stage metadata)
-                    is_external = f"external_stage_{spec.id}" in state
-                    if is_external:
+                    # Industry Standard: Use interface property instead of isinstance
+                    # This follows the Template Method pattern - plugins declare their type
+                    if plugin.is_external:
                         from app.utils.progress import save_stage_output, format_stage_output
+                        logger.info(f"Saving external stage output for {spec.id}: {list(stage_output.keys())}")
+                        
                         # Format and save external stage output
                         formatted_output = format_stage_output(
                             spec.id,
@@ -218,7 +220,7 @@ class PipelineRunner:
                             **{k: v for k, v in stage_output.items() if not k.startswith('_')}
                         )
                         save_stage_output(video_id, spec.id, formatted_output)
-                        logger.info(f"Saved external stage output for {spec.id}")
+                        logger.info(f"✓ Saved external stage output for {spec.id}")
                 
                 # Mark complete
                 run.status = StageStatus.COMPLETED
