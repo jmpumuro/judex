@@ -1,0 +1,50 @@
+# Judex Model Service - GPU-optimized inference container
+# Designed for Cloud Run GPU or GKE GPU nodes
+FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    tesseract-ocr \
+    libgl1 \
+    libglib2.0-0 \
+    libgomp1 \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    HF_HOME=/models/hf \
+    TRANSFORMERS_CACHE=/models/hf/transformers \
+    TEMP_DIR=/tmp/judex \
+    TORCH_HOME=/models/torch
+
+# Create directories
+RUN mkdir -p /models/hf /models/hf/transformers /models/torch /tmp/judex
+
+# Copy requirements for model service
+COPY requirements-models.txt requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy model code
+COPY app/models/ ./app/models/
+COPY app/core/ ./app/core/
+COPY model_service/ ./model_service/
+COPY scripts/prefetch_models.py ./scripts/
+
+# Prefetch models during build (speeds up cold starts significantly)
+# Comment out for faster builds during development
+RUN python scripts/prefetch_models.py || echo "Model prefetch completed with warnings"
+
+# Expose model service port
+EXPOSE 8001
+
+# Health check with longer timeout for GPU initialization
+HEALTHCHECK --interval=60s --timeout=30s --start-period=120s --retries=5 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=10)" || exit 1
+
+# Run model service
+CMD ["uvicorn", "model_service.main:app", "--host", "0.0.0.0", "--port", "8001"]

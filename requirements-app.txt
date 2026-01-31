@@ -1,0 +1,47 @@
+# Judex App Service - Lightweight dependencies (no ML)
+# For API container that calls Model Service via HTTP
+
+# Web framework
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+
+# HTTP client for model service
+httpx>=0.25.0
+
+# Data validation
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# Database
+sqlalchemy>=2.0.0
+asyncpg>=0.29.0
+psycopg2-binary>=2.9.9
+alembic>=1.12.0
+
+# Object storage
+minio>=7.2.0
+
+# Task queue (if using Celery)
+celery>=5.3.0
+redis>=5.0.0
+
+# LangGraph for pipeline orchestration
+langgraph>=0.0.40
+langchain>=0.1.0
+langchain-core>=0.1.0
+
+# OpenAI for LLM (cloud-based, no local GPU needed)
+openai>=1.0.0
+
+# Utilities
+python-dotenv>=1.0.0
+aiofiles>=23.2.0
+pillow>=10.0.0
+numpy>=1.24.0
+
+# SSE for streaming
+sse-starlette>=1.8.0
+
+# Video processing (CPU-based metadata extraction)
+moviepy>=1.0.3

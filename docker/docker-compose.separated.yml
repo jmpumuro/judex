@@ -1,0 +1,182 @@
+# Judex - Separated Architecture (App + Model Service)
+# Use this for production-like deployments with independent scaling
+
+services:
+  # ==========================================================================
+  # App Service - Lightweight API (CPU-only, fast startup, scales easily)
+  # ==========================================================================
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.app
+    image: judex-app:latest
+    container_name: judex-app
+    ports:
+      - "8000:8000"
+    env_file:
+      - ../.env
+    environment:
+      # Model Service connection
+      - USE_MODEL_SERVICE=true
+      - MODEL_SERVICE_URL=http://models:8001
+      
+      # LLM (OpenAI - runs in cloud, no local GPU needed)
+      # OPENAI_API_KEY loaded from .env
+      - LLM_PROVIDER=openai
+      - OPENAI_MODEL=gpt-4o-mini
+      
+      # Database
+      - DATABASE_URL=postgresql://docker:docker@postgres:5432/judex
+      
+      # MinIO Object Storage
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_EXTERNAL_ENDPOINT=localhost:9000
+      - MINIO_ACCESS_KEY=judex
+      - MINIO_SECRET_KEY=judex123
+      - MINIO_BUCKET=judex
+      
+      # Processing settings
+      - DEFAULT_SAMPLING_FPS=1.0
+      - SEGMENT_DURATION_SEC=3.0
+    
+    volumes:
+      - temp_data:/tmp/judex
+      - results_data:/data/judex
+    
+    depends_on:
+      models:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    
+    restart: unless-stopped
+    
+    # Lightweight - no ML models
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+
+  # ==========================================================================
+  # Model Service - GPU inference (heavy, warm instances)
+  # ==========================================================================
+  models:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.models
+    image: judex-models:latest
+    container_name: judex-models
+    ports:
+      - "8001:8001"
+    environment:
+      # Model configuration
+      - YOLO26_MODEL_ID=openvision/yolo26-s
+      - VIOLENCE_MODEL_ID=microsoft/xclip-base-patch32-16-frames
+      - WHISPER_MODEL_ID=openai/whisper-small
+      - PROFANITY_MODEL_ID=tarekziade/pardonmyai
+      - NLI_MODEL_ID=facebook/bart-large-mnli
+      
+      # Cache directories
+      - HF_HOME=/models/hf
+      - TRANSFORMERS_CACHE=/models/hf/transformers
+      - TORCH_HOME=/models/torch
+    
+    volumes:
+      # Persist model cache (survives container rebuilds)
+      - ~/.cache/judex/models:/models
+      - temp_data:/tmp/judex
+    
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=10)"]
+      interval: 30s
+      timeout: 15s
+      start_period: 120s
+      retries: 5
+    
+    restart: unless-stopped
+    
+    # GPU support (uncomment for NVIDIA GPUs)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    
+    # CPU fallback resources
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 12G
+        reservations:
+          cpus: '2'
+          memory: 8G
+
+  # ==========================================================================
+  # PostgreSQL Database
+  # ==========================================================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: judex-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=docker
+      - POSTGRES_PASSWORD=docker
+      - POSTGRES_DB=judex
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U docker -d judex"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ==========================================================================
+  # MinIO Object Storage
+  # ==========================================================================
+  minio:
+    image: minio/minio:latest
+    container_name: judex-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=judex
+      - MINIO_ROOT_PASSWORD=judex123
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ==========================================================================
+  # Redis (for Celery task queue - optional)
+  # ==========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: judex-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  temp_data:
+  results_data:
+  postgres_data:
+  minio_data:

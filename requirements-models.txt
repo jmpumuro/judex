@@ -1,0 +1,49 @@
+# Judex Model Service - Full ML dependencies
+# For GPU container running inference
+
+# Web framework (minimal)
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+
+# Data validation
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# PyTorch (included in base image, but specify for completeness)
+torch>=2.1.0
+torchvision>=0.16.0
+torchaudio>=2.1.0
+
+# Transformers ecosystem
+transformers>=4.35.0
+huggingface_hub>=0.19.0
+accelerate>=0.24.0
+safetensors>=0.4.0
+
+# YOLO models
+ultralytics>=8.0.200
+
+# Whisper ASR
+openai-whisper>=20231117
+
+# Vision models
+timm>=0.9.0
+einops>=0.7.0
+
+# Image processing
+pillow>=10.0.0
+opencv-python-headless>=4.8.0
+
+# OCR
+pytesseract>=0.3.10
+
+# Numerical
+numpy>=1.24.0
+scipy>=1.11.0
+
+# Utilities
+python-dotenv>=1.0.0
+aiofiles>=23.2.0
+
+# Quantization support (for Qwen)
+bitsandbytes>=0.41.0

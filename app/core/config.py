@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     # Qwen Settings (local fallback)
     qwen_model_id: str = os.getenv("QWEN_MODEL_ID", "Qwen/Qwen2.5-0.5B-Instruct")
     
+    # Model Service Settings (for separated architecture)
+    # Set to empty string to use local models (monolith mode)
+    model_service_url: str = os.getenv("MODEL_SERVICE_URL", "")
+    use_model_service: bool = os.getenv("USE_MODEL_SERVICE", "false").lower() == "true"
+    
     # Database Settings
     database_url: str = os.getenv("DATABASE_URL", "postgresql://docker:docker@localhost:5432/judex")
     
