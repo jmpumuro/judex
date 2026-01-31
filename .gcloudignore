@@ -1,0 +1,51 @@
+# .gcloudignore - files to exclude from Cloud Build uploads
+
+# Git
+.git/
+.gitignore
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.cursor/
+
+# Node (frontend)
+node_modules/
+frontend/node_modules/
+
+# Test files
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local data (not HuggingFace models - those are in /models in container)
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# Documentation (not needed for build)
+docs/
+*.md
+!README.md
+
+# IMPORTANT: Do NOT ignore app/models/ - it contains Python code, not ML weights
+# The default gcloudignore pattern ignores **/models/** but we need app/models/
+!app/models/
+!app/models/**
