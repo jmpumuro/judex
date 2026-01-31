@@ -15,9 +15,7 @@ steps:
     args:
       - 'build'
       - '-t'
-      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex:$COMMIT_SHA'
-      - '-t'
-      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex:latest'
+      - 'europe-west1-docker.pkg.dev/$PROJECT_ID/judex/judex:latest'
       - '-f'
       - 'Dockerfile'
       - '.'
@@ -27,12 +25,9 @@ steps:
   # ==========================================================================
   - name: 'gcr.io/cloud-builders/docker'
     id: 'push'
-    args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex:$COMMIT_SHA']
-    waitFor: ['build']
-
-  - name: 'gcr.io/cloud-builders/docker'
-    id: 'push-latest'
-    args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex:latest']
+    args:
+      - 'push'
+      - 'europe-west1-docker.pkg.dev/$PROJECT_ID/judex/judex:latest'
     waitFor: ['build']
 
   # ==========================================================================
@@ -45,8 +40,8 @@ steps:
       - 'run'
       - 'deploy'
       - 'judex'
-      - '--image=${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex:$COMMIT_SHA'
-      - '--region=$_REGION'
+      - '--image=europe-west1-docker.pkg.dev/$PROJECT_ID/judex/judex:latest'
+      - '--region=europe-west1'
       - '--platform=managed'
       - '--memory=8Gi'
       - '--cpu=4'
@@ -58,12 +53,8 @@ steps:
       - '--cpu-boost'
     waitFor: ['push']
 
-substitutions:
-  _REGION: europe-west1
-
 images:
-  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex:$COMMIT_SHA'
-  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex:latest'
+  - 'europe-west1-docker.pkg.dev/$PROJECT_ID/judex/judex:latest'
 
 options:
   logging: CLOUD_LOGGING_ONLY

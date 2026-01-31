@@ -4,53 +4,59 @@
 # Usage:
 #   gcloud builds submit --config=cloudbuild.separated.yaml
 #
-# Benefits:
-# - App container: ~200MB, 2s cold start, scales 0→100
-# - Model container: GPU-optimized, warm instances, independent scaling
+# Architecture:
+#   ┌─────────────────┐     ┌─────────────────┐
+#   │   judex-app     │────▶│  judex-models   │
+#   │   (2Gi, CPU)    │     │  (8Gi, GPU-ready)│
+#   │   Scales 0→100  │     │  Min 1 instance │
+#   └─────────────────┘     └─────────────────┘
 #
-# Prerequisites:
-# - Enable Cloud Run GPU (if using GPU)
-# - Create Artifact Registry repo: gcloud artifacts repositories create judex --repository-format=docker --location=europe-west1
+# Benefits:
+# - App: ~200MB, 2s cold start, scales to zero
+# - Models: warm instances, independent scaling
 
 steps:
   # ==========================================================================
-  # Build both images in parallel
+  # Build App Service (lightweight, no ML models)
   # ==========================================================================
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-app'
     args:
       - 'build'
       - '-t'
-      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex-app:$COMMIT_SHA'
-      - '-t'
-      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex-app:latest'
+      - 'europe-west1-docker.pkg.dev/$PROJECT_ID/judex/judex-app:latest'
       - '-f'
       - 'docker/Dockerfile.app'
       - '.'
 
+  # ==========================================================================
+  # Build Model Service (GPU-ready, all ML models)
+  # ==========================================================================
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-models'
     args:
       - 'build'
       - '-t'
-      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex-models:$COMMIT_SHA'
-      - '-t'
-      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex-models:latest'
+      - 'europe-west1-docker.pkg.dev/$PROJECT_ID/judex/judex-models:latest'
       - '-f'
       - 'docker/Dockerfile.models'
       - '.'
 
   # ==========================================================================
-  # Push images
+  # Push images (in parallel)
   # ==========================================================================
   - name: 'gcr.io/cloud-builders/docker'
     id: 'push-app'
-    args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex-app:$COMMIT_SHA']
+    args:
+      - 'push'
+      - 'europe-west1-docker.pkg.dev/$PROJECT_ID/judex/judex-app:latest'
     waitFor: ['build-app']
 
   - name: 'gcr.io/cloud-builders/docker'
     id: 'push-models'
-    args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex-models:$COMMIT_SHA']
+    args:
+      - 'push'
+      - 'europe-west1-docker.pkg.dev/$PROJECT_ID/judex/judex-models:latest'
     waitFor: ['build-models']
 
   # ==========================================================================
@@ -63,8 +69,8 @@ steps:
       - 'run'
       - 'deploy'
       - 'judex-models'
-      - '--image=${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex-models:$COMMIT_SHA'
-      - '--region=$_REGION'
+      - '--image=europe-west1-docker.pkg.dev/$PROJECT_ID/judex/judex-models:latest'
+      - '--region=europe-west1'
       - '--platform=managed'
       - '--memory=8Gi'
       - '--cpu=4'
@@ -74,27 +80,10 @@ steps:
       - '--max-instances=5'
       - '--allow-unauthenticated'
       - '--cpu-boost'
-      # For GPU support (when available in your region):
-      # - '--gpu=1'
-      # - '--gpu-type=nvidia-l4'
     waitFor: ['push-models']
 
   # ==========================================================================
-  # Get Model Service URL
-  # ==========================================================================
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'get-models-url'
-    entrypoint: 'bash'
-    args:
-      - '-c'
-      - |
-        MODEL_URL=$(gcloud run services describe judex-models --region=$_REGION --format='value(status.url)')
-        echo "MODEL_SERVICE_URL=$MODEL_URL" > /workspace/model_url.env
-        echo "Model service URL: $MODEL_URL"
-    waitFor: ['deploy-models']
-
-  # ==========================================================================
-  # Deploy App Service with Model URL
+  # Get Model Service URL and Deploy App
   # ==========================================================================
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: 'deploy-app'
@@ -102,10 +91,14 @@ steps:
     args:
       - '-c'
       - |
-        source /workspace/model_url.env
+        # Get the model service URL
+        MODEL_URL=$(gcloud run services describe judex-models --region=europe-west1 --format='value(status.url)')
+        echo "Model service URL: $MODEL_URL"
+        
+        # Deploy app with model service URL
         gcloud run deploy judex-app \
-          --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex-app:$COMMIT_SHA \
-          --region=$_REGION \
+          --image=europe-west1-docker.pkg.dev/$PROJECT_ID/judex/judex-app:latest \
+          --region=europe-west1 \
           --platform=managed \
           --memory=2Gi \
           --cpu=2 \
@@ -114,17 +107,13 @@ steps:
           --min-instances=0 \
           --max-instances=100 \
           --allow-unauthenticated \
-          --set-env-vars="USE_MODEL_SERVICE=true,MODEL_SERVICE_URL=$MODEL_SERVICE_URL"
-    waitFor: ['push-app', 'get-models-url']
-
-substitutions:
-  _REGION: europe-west1
+          --cpu-boost \
+          --set-env-vars="USE_MODEL_SERVICE=true,MODEL_SERVICE_URL=$MODEL_URL,SKIP_DB_INIT=true,SKIP_STORAGE_INIT=true"
+    waitFor: ['push-app', 'deploy-models']
 
 images:
-  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex-app:$COMMIT_SHA'
-  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex-app:latest'
-  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex-models:$COMMIT_SHA'
-  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex-models:latest'
+  - 'europe-west1-docker.pkg.dev/$PROJECT_ID/judex/judex-app:latest'
+  - 'europe-west1-docker.pkg.dev/$PROJECT_ID/judex/judex-models:latest'
 
 options:
   logging: CLOUD_LOGGING_ONLY
