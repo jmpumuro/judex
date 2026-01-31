@@ -7,3 +7,11 @@ export type { PolicyConfig, PolicyPreset, PolicyThresholds } from './settingsSto
 
 export { useLiveEventsStore } from './liveEventsStore'
 export type { LiveEvent } from './liveEventsStore'
+
+export { usePipelineStore } from './pipelineStore'
+export type {
+  CriteriaPreset,
+  CustomCriterion,
+  PipelineStage as PipelineStageConfig,
+  StageOutput
+} from './pipelineStore'

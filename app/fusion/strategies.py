@@ -303,3 +303,206 @@ class RuleBasedStrategy(BaseFusionStrategy):
                     final_score = max(final_score, max(detector_scores.values()))
         
         return min(final_score, 1.0)
+
+
+class ReliabilityWeightedStrategy(BaseFusionStrategy):
+    """
+    Reliability-weighted fusion strategy.
+    
+    Each detector has a reliability weight (0-1) that reflects its historical
+    accuracy and domain suitability. Scores are combined using these weights,
+    with calibrated thresholds applied.
+    
+    Industry Standard:
+    - Deterministic (no ML training required)
+    - Configurable reliability weights per detector
+    - Calibration profiles (conservative/balanced/aggressive)
+    - Missing signal handling (graceful degradation)
+    - Debug output for explainability
+    """
+    
+    strategy_type = "reliability_weighted"
+    
+    # Default reliability weights for detectors
+    # Higher = more reliable for violence detection
+    DEFAULT_RELIABILITY_WEIGHTS: Dict[str, float] = {
+        # Violence specialists
+        "xclip": 0.85,          # Strong video violence classifier
+        "videomae_violence": 0.80,  # Action recognition based
+        "pose_heuristics": 0.70,    # Deterministic but limited
+        
+        # Supporting signals
+        "yolo26": 0.60,         # Object detection, indirect signal
+        "yoloworld": 0.55,      # Open-vocab detection
+        "window_mining": 0.50,  # Preprocessing, not direct detection
+        
+        # Text/audio signals
+        "whisper": 0.65,        # Transcription for text moderation
+        "ocr": 0.55,            # OCR for text moderation
+        "text_moderation": 0.75,  # Good for profanity/hate
+    }
+    
+    # Calibration profiles
+    CALIBRATION_PROFILES: Dict[str, Dict[str, float]] = {
+        "conservative": {
+            "score_multiplier": 0.8,
+            "threshold_boost": 0.1,
+            "min_sources": 2,
+        },
+        "balanced": {
+            "score_multiplier": 1.0,
+            "threshold_boost": 0.0,
+            "min_sources": 1,
+        },
+        "aggressive": {
+            "score_multiplier": 1.2,
+            "threshold_boost": -0.1,
+            "min_sources": 1,
+        },
+    }
+    
+    def compute_criterion_score(
+        self,
+        criterion: CriterionSpec,
+        routing_rules: List[RoutingRule],
+        detector_outputs: Dict[str, DetectorResult]
+    ) -> float:
+        """
+        Compute criterion score using reliability-weighted fusion.
+        """
+        if not routing_rules:
+            return 0.0
+        
+        # Get calibration profile from spec
+        calibration = self.spec.custom_config.get("calibration", "balanced") if hasattr(self.spec, "custom_config") else "balanced"
+        profile = self.CALIBRATION_PROFILES.get(calibration, self.CALIBRATION_PROFILES["balanced"])
+        
+        # Get custom reliability weights if provided
+        custom_weights = {}
+        if hasattr(self.spec, "custom_config") and self.spec.custom_config:
+            custom_weights = self.spec.custom_config.get("reliability_weights", {})
+        
+        # Collect scores with reliability weights
+        weighted_scores = []
+        total_reliability = 0.0
+        sources_with_signal = 0
+        
+        for rule in routing_rules:
+            detector_id = rule.detector_id
+            
+            # Get reliability weight
+            reliability = custom_weights.get(
+                detector_id, 
+                self.DEFAULT_RELIABILITY_WEIGHTS.get(detector_id, 0.5)
+            )
+            
+            # Extract scores from detector
+            scores = self._extract_scores_from_detector(
+                detector_id,
+                rule.output_field,
+                detector_outputs,
+                criterion.id
+            )
+            
+            if scores:
+                max_score = max(scores)
+                # Apply rule weight as additional factor
+                combined_weight = reliability * rule.weight
+                
+                weighted_scores.append({
+                    "detector": detector_id,
+                    "score": max_score,
+                    "reliability": reliability,
+                    "rule_weight": rule.weight,
+                    "combined_weight": combined_weight,
+                    "contribution": max_score * combined_weight,
+                })
+                
+                total_reliability += combined_weight
+                sources_with_signal += 1
+        
+        # Handle missing signals
+        if sources_with_signal < profile["min_sources"]:
+            # Not enough sources, return low score with uncertainty
+            if weighted_scores:
+                # Use available data but with penalty
+                base_score = sum(ws["contribution"] for ws in weighted_scores) / max(total_reliability, 0.001)
+                return max(0.0, min(base_score * 0.5, 0.3))  # Cap at 0.3 for uncertain
+            return 0.0
+        
+        # Compute weighted average
+        if total_reliability == 0:
+            return 0.0
+        
+        raw_score = sum(ws["contribution"] for ws in weighted_scores) / total_reliability
+        
+        # Apply calibration
+        calibrated_score = raw_score * profile["score_multiplier"]
+        
+        return max(0.0, min(calibrated_score, 1.0))
+    
+    def get_fusion_debug(
+        self,
+        criterion: CriterionSpec,
+        routing_rules: List[RoutingRule],
+        detector_outputs: Dict[str, DetectorResult]
+    ) -> Dict[str, Any]:
+        """
+        Get debug information about the fusion process.
+        
+        Returns detailed breakdown of how the score was computed.
+        """
+        calibration = self.spec.custom_config.get("calibration", "balanced") if hasattr(self.spec, "custom_config") else "balanced"
+        profile = self.CALIBRATION_PROFILES.get(calibration, self.CALIBRATION_PROFILES["balanced"])
+        
+        custom_weights = {}
+        if hasattr(self.spec, "custom_config") and self.spec.custom_config:
+            custom_weights = self.spec.custom_config.get("reliability_weights", {})
+        
+        debug = {
+            "criterion_id": criterion.id,
+            "calibration_profile": calibration,
+            "profile_settings": profile,
+            "detector_contributions": [],
+            "missing_detectors": [],
+            "total_reliability": 0.0,
+            "sources_with_signal": 0,
+        }
+        
+        expected_detectors = {rule.detector_id for rule in routing_rules}
+        found_detectors = set()
+        
+        for rule in routing_rules:
+            detector_id = rule.detector_id
+            reliability = custom_weights.get(
+                detector_id,
+                self.DEFAULT_RELIABILITY_WEIGHTS.get(detector_id, 0.5)
+            )
+            
+            scores = self._extract_scores_from_detector(
+                detector_id,
+                rule.output_field,
+                detector_outputs,
+                criterion.id
+            )
+            
+            if scores:
+                found_detectors.add(detector_id)
+                max_score = max(scores)
+                combined_weight = reliability * rule.weight
+                
+                debug["detector_contributions"].append({
+                    "detector": detector_id,
+                    "score": round(max_score, 3),
+                    "reliability": reliability,
+                    "rule_weight": rule.weight,
+                    "contribution": round(max_score * combined_weight, 3),
+                })
+                
+                debug["total_reliability"] += combined_weight
+                debug["sources_with_signal"] += 1
+        
+        # Track missing detectors
+        debug["missing_detectors"] = list(expected_detectors - found_detectors)
+        
+        return debug

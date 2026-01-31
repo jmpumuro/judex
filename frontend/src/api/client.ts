@@ -302,6 +302,87 @@ export const health = {
 }
 
 // ============================================================================
+// Chat API (ReportChat Agent)
+// ============================================================================
+
+export interface ChatMessage {
+  id: string
+  role: 'user' | 'assistant' | 'system' | 'tool'
+  content: string
+  tool_calls?: any[]
+  metadata?: Record<string, any>
+  timestamp: string
+}
+
+export interface ChatResponse {
+  thread_id: string
+  evaluation_id: string
+  messages: ChatMessage[]
+  tool_trace?: {
+    steps: any[]
+    tools_called: number
+  }
+  suggested_questions?: string[]
+}
+
+export interface ThreadResponse {
+  thread_id: string
+  evaluation_id: string
+  messages: ChatMessage[]
+  message_count: number
+  created_at?: string
+  updated_at?: string
+}
+
+export const chat = {
+  /**
+   * Start a new chat thread with the initial report.
+   */
+  startThread: async (evaluationId: string, threadId?: string): Promise<ChatResponse> => {
+    const { data } = await api.post<ChatResponse>(
+      `/evaluations/${evaluationId}/chat/start`,
+      { thread_id: threadId }
+    )
+    return data
+  },
+
+  /**
+   * Send a message to the chat agent.
+   */
+  sendMessage: async (
+    evaluationId: string, 
+    threadId: string, 
+    message: string
+  ): Promise<ChatResponse> => {
+    const { data } = await api.post<ChatResponse>(
+      `/evaluations/${evaluationId}/chat`,
+      { thread_id: threadId, message }
+    )
+    return data
+  },
+
+  /**
+   * Get full thread history.
+   */
+  getThread: async (evaluationId: string, threadId: string): Promise<ThreadResponse> => {
+    const { data } = await api.get<ThreadResponse>(
+      `/evaluations/${evaluationId}/chat/${threadId}`
+    )
+    return data
+  },
+
+  /**
+   * Get suggested questions for an evaluation.
+   */
+  getSuggestedQuestions: async (evaluationId: string): Promise<{ questions: string[] }> => {
+    const { data } = await api.get<{ questions: string[] }>(
+      `/evaluations/${evaluationId}/chat/questions`
+    )
+    return data
+  },
+}
+
+// ============================================================================
 // Default export - full API client
 // ============================================================================
 
@@ -309,6 +390,7 @@ export default {
   evaluations,
   criteria,
   health,
+  chat,
   // Raw axios instance for custom requests
   raw: api,
 }

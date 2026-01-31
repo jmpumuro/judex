@@ -57,7 +57,7 @@ const Analytics: FC = () => {
           <div className="bg-gray-900 border border-gray-800 p-5">
             <div className="flex items-center justify-between mb-3">
               <Video size={20} className="text-gray-500" />
-              <span className="text-[10px] text-gray-500 uppercase">Total Videos</span>
+              <span className="text-[10px] text-gray-500 uppercase">Total Media</span>
             </div>
             <div className="text-3xl font-bold">{stats.total}</div>
             <div className="text-xs text-gray-500 mt-1">{stats.completed} completed, {stats.processing} processing</div>
@@ -132,7 +132,7 @@ const Analytics: FC = () => {
                 ))}
               </div>
             ) : (
-              <p className="text-gray-500 text-center py-4 text-sm">No completed videos yet</p>
+              <p className="text-gray-500 text-center py-4 text-sm">No completed evaluations yet</p>
             )}
           </div>
         </div>
@@ -159,7 +159,7 @@ const Analytics: FC = () => {
               ))}
             </div>
           ) : (
-            <p className="text-gray-500 text-center py-4 text-sm">Process videos to see average scores</p>
+            <p className="text-gray-500 text-center py-4 text-sm">Process media to see average scores</p>
           )}
         </div>
 
@@ -167,8 +167,8 @@ const Analytics: FC = () => {
         {stats.total === 0 && (
           <div className="text-center py-12 border border-dashed border-gray-800 mt-6">
             <BarChart3 size={36} className="mx-auto mb-3 text-gray-700" />
-            <p className="text-gray-500 mb-1 text-sm">No videos processed yet</p>
-            <p className="text-xs text-gray-600">Add and process videos to see analytics</p>
+            <p className="text-gray-500 mb-1 text-sm">No media processed yet</p>
+            <p className="text-xs text-gray-600">Add and process media to see analytics</p>
           </div>
         )}
       </div>

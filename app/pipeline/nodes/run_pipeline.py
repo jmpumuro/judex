@@ -5,13 +5,27 @@ This is the bridge between the stable LangGraph structure and the
 dynamic stage execution system. All detector stages run inside
 this single node, keeping the main graph stable.
 
-Industry Standard: Uses LangGraph config for callbacks and criteria.
+Industry Standard Architecture:
+- Plugin Pattern: Stages are self-contained plugins
+- Registry Pattern: Dynamic stage discovery
+- Phase-based Execution: Independent stages can run in parallel
+- Uses LangGraph config for callbacks and criteria
 
 Graph structure becomes:
   ingest -> segment -> run_pipeline -> fuse_policy -> llm_report -> END
                          └── (dynamic stages via PipelineRunner)
+
+Parallel Execution Phases:
+  1. INGEST: Video ingestion
+  2. EXTRACT: Frame extraction, segmentation
+  3. PREPROCESS: Window mining, quick YOLO pass
+  4. DETECT: Main detectors (parallel: xclip, videomae, pose, whisper, ocr)
+  5. ANALYZE: Text moderation
+  6. FUSE: Score fusion
+  7. REPORT: Report generation
 """
 import asyncio
+import os
 from typing import Dict, Any, Optional
 from langchain_core.runnables import RunnableConfig
 
@@ -21,6 +35,10 @@ from app.pipeline.callbacks import get_progress_callback, get_evaluation_criteri
 from app.core.logging import get_logger
 
 logger = get_logger("node.run_pipeline")
+
+# Environment configuration for parallel execution
+ENABLE_PARALLEL_EXECUTION = os.getenv("ENABLE_PARALLEL_STAGES", "false").lower() == "true"
+MAX_PARALLEL_STAGES = int(os.getenv("MAX_PARALLEL_STAGES", "3"))
 
 
 def run_pipeline_node_impl(state: PipelineState, config: Optional[RunnableConfig] = None) -> PipelineState:
@@ -68,21 +86,29 @@ def run_pipeline_node_impl(state: PipelineState, config: Optional[RunnableConfig
         stop_on_error=False,
     )
     
-    # Run the pipeline
+    # Run the pipeline (parallel or sequential based on config)
     try:
+        # Choose execution mode
+        if ENABLE_PARALLEL_EXECUTION:
+            logger.info(f"Using PARALLEL execution (max_parallel={MAX_PARALLEL_STAGES})")
+            run_coro = runner.run_parallel(stages, dict(state), max_parallel=MAX_PARALLEL_STAGES)
+        else:
+            logger.info("Using SEQUENTIAL execution")
+            run_coro = runner.run(stages, dict(state))
+        
         loop = asyncio.get_event_loop()
         if loop.is_running():
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(
-                    asyncio.run,
-                    runner.run(stages, dict(state))
-                )
+                future = executor.submit(asyncio.run, run_coro)
                 result = future.result()
         else:
-            result = loop.run_until_complete(runner.run(stages, dict(state)))
+            result = loop.run_until_complete(run_coro)
     except RuntimeError:
-        result = asyncio.run(runner.run(stages, dict(state)))
+        if ENABLE_PARALLEL_EXECUTION:
+            result = asyncio.run(runner.run_parallel(stages, dict(state), max_parallel=MAX_PARALLEL_STAGES))
+        else:
+            result = asyncio.run(runner.run(stages, dict(state)))
     
     # Merge results back into state
     for key, value in result.final_state.items():
@@ -112,6 +138,8 @@ def run_pipeline_node(state: PipelineState) -> PipelineState:
 async def run_pipeline_node_async(state: PipelineState, config: Optional[RunnableConfig] = None) -> PipelineState:
     """
     Async version of run_pipeline_node for direct async invocation.
+    
+    Supports parallel execution when ENABLE_PARALLEL_STAGES=true.
     """
     logger.info("=== Run Pipeline Node (Async) ===")
     
@@ -134,7 +162,13 @@ async def run_pipeline_node_async(state: PipelineState, config: Optional[Runnabl
         stop_on_error=False,
     )
     
-    result = await runner.run(stages, dict(state))
+    # Choose execution mode based on environment config
+    if ENABLE_PARALLEL_EXECUTION:
+        logger.info(f"Using PARALLEL execution (max_parallel={MAX_PARALLEL_STAGES})")
+        result = await runner.run_parallel(stages, dict(state), max_parallel=MAX_PARALLEL_STAGES)
+    else:
+        logger.info("Using SEQUENTIAL execution")
+        result = await runner.run(stages, dict(state))
     
     # Merge results
     for key, value in result.final_state.items():

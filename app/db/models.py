@@ -455,3 +455,193 @@ class LiveEvent(Base):
             "manual_verdict": self.manual_verdict.value if self.manual_verdict else None,
             "captured_at": self.captured_at.isoformat() if self.captured_at else None,
         }
+
+
+# =============================================================================
+# Criteria Configuration with Versioning
+# =============================================================================
+
+class CriteriaConfig(Base):
+    """
+    Custom criteria configuration with fusion settings and stage overrides.
+    
+    Industry Standard: Configuration versioning for audit trail and rollback.
+    """
+    __tablename__ = "criteria_configs"
+    
+    id = Column(String(64), primary_key=True, default=generate_uuid)
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    
+    # Base criteria (the criteria definitions)
+    criteria_data = Column(JSON, nullable=False, default=dict)
+    options_data = Column(JSON, nullable=True)
+    
+    # Fusion settings (verdict strategy, weights, thresholds)
+    fusion_settings = Column(JSON, nullable=True)
+    
+    # Stage-specific knob overrides
+    stage_overrides = Column(JSON, nullable=True)
+    
+    # Version tracking
+    current_version = Column(String(64), nullable=True)
+    
+    # Metadata
+    is_active = Column(Boolean, default=True)
+    created_by = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    versions = relationship("CriteriaVersion", back_populates="config", cascade="all, delete-orphan")
+    
+    __table_args__ = (
+        Index('ix_criteria_configs_name', 'name'),
+        Index('ix_criteria_configs_active', 'is_active'),
+    )
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "criteria_data": self.criteria_data,
+            "options_data": self.options_data,
+            "fusion_settings": self.fusion_settings,
+            "stage_overrides": self.stage_overrides,
+            "current_version": self.current_version,
+            "is_active": self.is_active,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class CriteriaVersion(Base):
+    """
+    Version history for criteria configurations.
+    
+    Every config change creates a new version for audit and rollback.
+    """
+    __tablename__ = "criteria_versions"
+    
+    id = Column(String(64), primary_key=True, default=generate_uuid)
+    criteria_id = Column(String(64), ForeignKey("criteria_configs.id", ondelete="CASCADE"), nullable=False)
+    
+    # Snapshot of the config at this version
+    version_data = Column(JSON, nullable=False)
+    
+    # Change metadata
+    change_summary = Column(Text, nullable=True)
+    created_by = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    config = relationship("CriteriaConfig", back_populates="versions")
+    
+    __table_args__ = (
+        Index('ix_criteria_versions_criteria_id', 'criteria_id'),
+        Index('ix_criteria_versions_created_at', 'created_at'),
+    )
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "criteria_id": self.criteria_id,
+            "version_data": self.version_data,
+            "change_summary": self.change_summary,
+            "created_by": self.created_by,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+# =============================================================================
+# Chat/Conversation Models (ReportChat Agent)
+# =============================================================================
+
+class ChatThread(Base):
+    """
+    A chat conversation thread for discussing an evaluation.
+    
+    Industry Standard: Scoped to evaluation + user for access control.
+    """
+    __tablename__ = "chat_threads"
+    
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    evaluation_id = Column(String(36), ForeignKey("evaluations.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(String(255), nullable=True)  # Optional user scoping
+    
+    # Thread metadata
+    title = Column(String(255), nullable=True)  # Optional thread title
+    
+    # Memory management
+    summary = Column(Text, nullable=True)  # Summarized older messages
+    summarized_up_to = Column(Integer, default=0)  # Index of last summarized message
+    message_count = Column(Integer, default=0)
+    
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    messages = relationship("ChatMessage", back_populates="thread", cascade="all, delete-orphan")
+    evaluation = relationship("Evaluation", foreign_keys=[evaluation_id])
+    
+    __table_args__ = (
+        Index('ix_chat_threads_evaluation_id', 'evaluation_id'),
+        Index('ix_chat_threads_user_id', 'user_id'),
+    )
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "evaluation_id": self.evaluation_id,
+            "user_id": self.user_id,
+            "title": self.title,
+            "message_count": self.message_count,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class ChatMessage(Base):
+    """
+    A single message in a chat thread.
+    
+    Stores role, content, tool calls, and metadata.
+    """
+    __tablename__ = "chat_messages"
+    
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    thread_id = Column(String(36), ForeignKey("chat_threads.id", ondelete="CASCADE"), nullable=False)
+    
+    # Message content
+    role = Column(String(20), nullable=False)  # user, assistant, system, tool
+    content = Column(Text, nullable=False)
+    
+    # Tool calls (for tracing/audit)
+    tool_calls = Column(JSON, nullable=True)  # List of tool call records
+    
+    # Additional message metadata (named message_meta to avoid SQLAlchemy reserved name)
+    message_meta = Column(JSON, nullable=True)
+    
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    thread = relationship("ChatThread", back_populates="messages")
+    
+    __table_args__ = (
+        Index('ix_chat_messages_thread_id', 'thread_id'),
+        Index('ix_chat_messages_created_at', 'created_at'),
+    )
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "thread_id": self.thread_id,
+            "role": self.role,
+            "content": self.content,
+            "tool_calls": self.tool_calls,
+            "metadata": self.message_meta,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }

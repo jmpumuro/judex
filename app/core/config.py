@@ -36,13 +36,17 @@ class Settings(BaseSettings):
     profanity_model_id: str = os.getenv("PROFANITY_MODEL_ID", "tarekziade/pardonmyai")
     nli_model_id: str = os.getenv("NLI_MODEL_ID", "facebook/bart-large-mnli")
     
-    # LLM Settings (Qwen for local, OpenAI as fallback)
-    llm_provider: str = os.getenv("LLM_PROVIDER", "qwen")  # "qwen" or "openai"
-    qwen_model_id: str = os.getenv("QWEN_MODEL_ID", "Qwen/Qwen2.5-0.5B-Instruct")  # Use 0.5B for memory efficiency
+    # LLM Settings - Factory Pattern (OpenAI default, Qwen local fallback)
+    # Provider: "openai" (default, cloud) or "qwen" (local, needs GPU)
+    llm_provider: str = os.getenv("LLM_PROVIDER", "openai")
     
-    # OpenAI Settings (fallback)
+    # OpenAI Settings (default provider)
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    openai_base_url: str = os.getenv("OPENAI_BASE_URL", "")  # For compatible APIs
+    
+    # Qwen Settings (local fallback)
+    qwen_model_id: str = os.getenv("QWEN_MODEL_ID", "Qwen/Qwen2.5-0.5B-Instruct")
     
     # Database Settings
     database_url: str = os.getenv("DATABASE_URL", "postgresql://docker:docker@localhost:5432/judex")

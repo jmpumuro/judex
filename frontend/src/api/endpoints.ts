@@ -440,6 +440,270 @@ export const stagesApi = {
   },
 }
 
+// ===== CONFIG API - Schema, Validation, Versioning =====
+
+export interface ConfigKnob {
+  id: string
+  label: string
+  description: string
+  type: 'enum' | 'number' | 'range' | 'boolean' | 'string_list' | 'string'
+  default: any
+  min_value?: number
+  max_value?: number
+  step?: number
+  options?: Array<{ value: string; label: string }>
+  category: string
+  level: 'basic' | 'advanced'
+  stage_types?: string[]
+}
+
+export interface ConfigSchema {
+  fusion_knobs: ConfigKnob[]
+  stage_knobs: ConfigKnob[]
+  supported_stages: string[]
+}
+
+export interface FusionSettings {
+  verdict_strategy?: string
+  top_n_count?: number
+  criterion_overrides?: Record<string, {
+    weight?: number
+    threshold_safe?: number
+    threshold_caution?: number
+    threshold_unsafe?: number
+    enabled?: boolean
+  }>
+  confidence_floor?: number
+  escalation_threshold?: number
+}
+
+export interface StageKnobs {
+  // Common settings
+  sensitivity?: string
+  confidence_threshold?: number
+  max_detections?: number
+  include_classes?: string[]
+  exclude_classes?: string[]
+  quality_mode?: string
+  // Violence detection (X-CLIP, VideoMAE)
+  temporal_window?: number
+  // Window mining
+  motion_threshold?: number
+  // Pose heuristics
+  interaction_distance?: number
+  // NSFW detection
+  nsfw_threshold?: number
+  // Text moderation
+  profanity_threshold?: number
+}
+
+export interface ConfigValidationError {
+  field: string
+  message: string
+  value?: any
+}
+
+export interface ConfigValidationResult {
+  valid: boolean
+  errors: ConfigValidationError[]
+  warnings: ConfigValidationError[]
+}
+
+export interface ConfigVersion {
+  version_id: string
+  criteria_id: string
+  created_at: string
+  created_by?: string
+  change_summary?: string
+  is_current: boolean
+}
+
+export interface ConfigPreview {
+  field: string
+  label: string
+  current_value: any
+  new_value: any
+  changed: boolean
+}
+
+export const configApi = {
+  /**
+   * Get full configuration schema for UI rendering
+   */
+  getSchema: async (): Promise<ConfigSchema> => {
+    const { data } = await api.get<ConfigSchema>('/config/schema')
+    return data
+  },
+
+  /**
+   * Get fusion schema only
+   */
+  getFusionSchema: async (): Promise<{ knobs: ConfigKnob[] }> => {
+    const { data } = await api.get('/config/schema/fusion')
+    return data
+  },
+
+  /**
+   * Get stage knobs schema
+   */
+  getStageSchema: async (): Promise<{ knobs: ConfigKnob[]; supported_stages: string[] }> => {
+    const { data } = await api.get('/config/schema/stages')
+    return data
+  },
+
+  /**
+   * Validate fusion settings
+   */
+  validateFusion: async (settings: FusionSettings): Promise<ConfigValidationResult> => {
+    const { data } = await api.post<ConfigValidationResult>('/config/validate/fusion', settings)
+    return data
+  },
+
+  /**
+   * Validate stage knobs
+   */
+  validateStage: async (stageType: string, knobs: StageKnobs): Promise<ConfigValidationResult> => {
+    const { data } = await api.post<ConfigValidationResult>(`/config/validate/stage/${stageType}`, knobs)
+    return data
+  },
+
+  /**
+   * Get criteria configuration
+   */
+  getCriteriaConfig: async (criteriaId: string): Promise<any> => {
+    const { data } = await api.get(`/config/criteria/${criteriaId}`)
+    return data
+  },
+
+  /**
+   * Update criteria configuration
+   */
+  updateCriteriaConfig: async (criteriaId: string, update: {
+    fusion_settings?: FusionSettings
+    stage_overrides?: Record<string, StageKnobs>
+    change_summary?: string
+  }): Promise<{ id: string; version_id: string; message: string }> => {
+    const { data } = await api.put(`/config/criteria/${criteriaId}`, update)
+    return data
+  },
+
+  /**
+   * Preview config changes
+   */
+  previewChanges: async (criteriaId: string, update: {
+    fusion_settings?: FusionSettings
+    stage_overrides?: Record<string, StageKnobs>
+  }): Promise<{ changes: ConfigPreview[]; change_count: number }> => {
+    const { data } = await api.post(`/config/criteria/${criteriaId}/preview`, update)
+    return data
+  },
+
+  /**
+   * List config versions
+   */
+  listVersions: async (criteriaId: string, limit = 10): Promise<ConfigVersion[]> => {
+    const { data } = await api.get(`/config/criteria/${criteriaId}/versions`, { params: { limit } })
+    return data
+  },
+
+  /**
+   * Rollback to a previous version
+   */
+  rollback: async (criteriaId: string, versionId: string): Promise<{ message: string; new_version_id: string }> => {
+    const { data } = await api.post(`/config/criteria/${criteriaId}/rollback`, null, { 
+      params: { version_id: versionId } 
+    })
+    return data
+  },
+
+  /**
+   * Reset to defaults
+   */
+  resetToDefaults: async (criteriaId: string): Promise<{ message: string; version_id: string }> => {
+    const { data } = await api.post(`/config/criteria/${criteriaId}/reset`)
+    return data
+  },
+}
+
+// ===== CHAT API (ReportChat Agent) =====
+
+export interface ChatMessage {
+  id: string
+  role: 'user' | 'assistant' | 'system' | 'tool'
+  content: string
+  tool_calls?: any[]
+  metadata?: Record<string, any>
+  timestamp: string
+}
+
+export interface ChatResponse {
+  thread_id: string
+  evaluation_id: string
+  messages: ChatMessage[]
+  tool_trace?: {
+    steps: any[]
+    tools_called: number
+  }
+  suggested_questions?: string[]
+}
+
+export interface ThreadResponse {
+  thread_id: string
+  evaluation_id: string
+  messages: ChatMessage[]
+  message_count: number
+  created_at?: string
+  updated_at?: string
+}
+
+export const chatApi = {
+  /**
+   * Start a new chat thread with the initial report
+   */
+  startThread: async (evaluationId: string, threadId?: string): Promise<ChatResponse> => {
+    const { data } = await api.post<ChatResponse>(
+      `/evaluations/${evaluationId}/chat/start`,
+      { thread_id: threadId }
+    )
+    return data
+  },
+
+  /**
+   * Send a message to the chat agent
+   */
+  sendMessage: async (
+    evaluationId: string, 
+    threadId: string, 
+    message: string
+  ): Promise<ChatResponse> => {
+    const { data } = await api.post<ChatResponse>(
+      `/evaluations/${evaluationId}/chat`,
+      { thread_id: threadId, message }
+    )
+    return data
+  },
+
+  /**
+   * Get full thread history
+   */
+  getThread: async (evaluationId: string, threadId: string): Promise<ThreadResponse> => {
+    const { data } = await api.get<ThreadResponse>(
+      `/evaluations/${evaluationId}/chat/${threadId}`
+    )
+    return data
+  },
+
+  /**
+   * Get suggested questions for an evaluation
+   */
+  getSuggestedQuestions: async (evaluationId: string): Promise<{ questions: string[] }> => {
+    const { data } = await api.get<{ questions: string[] }>(
+      `/evaluations/${evaluationId}/chat/questions`
+    )
+    return data
+  },
+}
+
 // ===== LIVE FEED API =====
 
 export const liveApi = {

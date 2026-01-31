@@ -15,9 +15,13 @@ class DetectorCapability(str, Enum):
     VISUAL_OBJECTS = "visual_objects"          # YOLO26 - standard object detection
     VISUAL_OPEN_VOCAB = "visual_open_vocab"    # YOLOWORLD - open vocabulary detection
     VIOLENCE_VIDEO = "violence_video"          # X-CLIP - video violence analysis
+    VIOLENCE_ACTION = "violence_action"        # VideoMAE - action-based violence detection
+    VIOLENCE_POSE = "violence_pose"            # Pose heuristics - bare-hand violence
+    WINDOW_MINING = "window_mining"            # Candidate window detection
     AUDIO_SPEECH = "audio_speech"              # Whisper - speech transcription
     VISUAL_TEXT = "visual_text"                # OCR - on-screen text extraction
     TEXT_MODERATION = "text_moderation"        # Content moderation of text
+    NSFW_VISUAL = "nsfw_visual"                # NSFW visual detection - sexual content confirmation
 
 
 @dataclass
@@ -55,6 +59,7 @@ class RoutingConfig:
         """Create default routing configuration."""
         return cls(
             detectors={
+                # Core object detection
                 "yolo26": DetectorConfig(
                     id="yolo26",
                     capabilities=[DetectorCapability.VISUAL_OBJECTS],
@@ -67,11 +72,30 @@ class RoutingConfig:
                     priority=15,
                     always_include=True
                 ),
+                
+                # Enhanced violence detection stack
+                "window_mining": DetectorConfig(
+                    id="window_mining",
+                    capabilities=[DetectorCapability.WINDOW_MINING],
+                    priority=18,  # After YOLO, before violence detectors
+                ),
                 "xclip": DetectorConfig(
                     id="xclip",
                     capabilities=[DetectorCapability.VIOLENCE_VIDEO],
                     priority=20
                 ),
+                "videomae_violence": DetectorConfig(
+                    id="videomae_violence",
+                    capabilities=[DetectorCapability.VIOLENCE_ACTION],
+                    priority=21  # Parallel to X-CLIP
+                ),
+                "pose_heuristics": DetectorConfig(
+                    id="pose_heuristics",
+                    capabilities=[DetectorCapability.VIOLENCE_POSE],
+                    priority=22  # After window mining
+                ),
+                
+                # Audio/text analysis
                 "whisper": DetectorConfig(
                     id="whisper",
                     capabilities=[DetectorCapability.AUDIO_SPEECH],
@@ -88,11 +112,49 @@ class RoutingConfig:
                     capabilities=[DetectorCapability.TEXT_MODERATION],
                     priority=50
                 ),
+                
+                # NSFW Visual Detection (reduces sexual false positives)
+                # Industry standard: Profanity alone ≠ Sexual content
+                # Requires visual confirmation for sexual content scoring
+                "nsfw_detection": DetectorConfig(
+                    id="nsfw_detection",
+                    capabilities=[DetectorCapability.NSFW_VISUAL],
+                    priority=25  # After YOLO, before fusion
+                ),
             },
             keyword_to_capabilities={
-                # Violence-related
-                "violence": [DetectorCapability.VIOLENCE_VIDEO, DetectorCapability.VISUAL_OBJECTS, DetectorCapability.VISUAL_OPEN_VOCAB],
-                "fight": [DetectorCapability.VIOLENCE_VIDEO, DetectorCapability.VISUAL_OBJECTS],
+                # Violence-related - now includes enhanced stack
+                "violence": [
+                    DetectorCapability.VIOLENCE_VIDEO, 
+                    DetectorCapability.VIOLENCE_ACTION,
+                    DetectorCapability.VIOLENCE_POSE,
+                    DetectorCapability.WINDOW_MINING,
+                    DetectorCapability.VISUAL_OBJECTS, 
+                    DetectorCapability.VISUAL_OPEN_VOCAB
+                ],
+                "fight": [
+                    DetectorCapability.VIOLENCE_VIDEO, 
+                    DetectorCapability.VIOLENCE_ACTION,
+                    DetectorCapability.VIOLENCE_POSE,
+                    DetectorCapability.WINDOW_MINING,
+                    DetectorCapability.VISUAL_OBJECTS
+                ],
+                "punch": [
+                    DetectorCapability.VIOLENCE_ACTION,
+                    DetectorCapability.VIOLENCE_POSE,
+                    DetectorCapability.WINDOW_MINING
+                ],
+                "kick": [
+                    DetectorCapability.VIOLENCE_ACTION,
+                    DetectorCapability.VIOLENCE_POSE,
+                    DetectorCapability.WINDOW_MINING
+                ],
+                "assault": [
+                    DetectorCapability.VIOLENCE_VIDEO,
+                    DetectorCapability.VIOLENCE_ACTION,
+                    DetectorCapability.VIOLENCE_POSE,
+                    DetectorCapability.WINDOW_MINING
+                ],
                 "weapon": [DetectorCapability.VISUAL_OBJECTS, DetectorCapability.VISUAL_OPEN_VOCAB],
                 "blood": [DetectorCapability.VISUAL_OBJECTS, DetectorCapability.VIOLENCE_VIDEO],
                 "gore": [DetectorCapability.VISUAL_OBJECTS, DetectorCapability.VIOLENCE_VIDEO],
@@ -105,10 +167,25 @@ class RoutingConfig:
                 "discrimination": [DetectorCapability.AUDIO_SPEECH, DetectorCapability.TEXT_MODERATION],
                 "extremism": [DetectorCapability.AUDIO_SPEECH, DetectorCapability.TEXT_MODERATION],
                 
-                # Sexual content
-                "sexual": [DetectorCapability.VISUAL_OBJECTS, DetectorCapability.VISUAL_OPEN_VOCAB, DetectorCapability.TEXT_MODERATION],
-                "nudity": [DetectorCapability.VISUAL_OBJECTS, DetectorCapability.VISUAL_OPEN_VOCAB],
-                "adult": [DetectorCapability.VISUAL_OBJECTS, DetectorCapability.TEXT_MODERATION],
+                # Sexual content - requires NSFW visual detection
+                # Industry standard: Profanity alone ≠ Sexual content
+                "sexual": [
+                    DetectorCapability.NSFW_VISUAL,  # Primary: visual confirmation
+                    DetectorCapability.TEXT_MODERATION,  # Secondary: explicit sexual language
+                    DetectorCapability.VISUAL_OBJECTS,
+                    DetectorCapability.VISUAL_OPEN_VOCAB
+                ],
+                "nudity": [
+                    DetectorCapability.NSFW_VISUAL,  # Primary: visual detection
+                    DetectorCapability.VISUAL_OBJECTS, 
+                    DetectorCapability.VISUAL_OPEN_VOCAB
+                ],
+                "adult": [
+                    DetectorCapability.NSFW_VISUAL,  # Primary: visual detection
+                    DetectorCapability.TEXT_MODERATION
+                ],
+                "nsfw": [DetectorCapability.NSFW_VISUAL],
+                "porn": [DetectorCapability.NSFW_VISUAL],
                 
                 # Drugs
                 "drug": [DetectorCapability.VISUAL_OBJECTS, DetectorCapability.VISUAL_OPEN_VOCAB, DetectorCapability.TEXT_MODERATION],

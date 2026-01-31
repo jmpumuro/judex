@@ -5,10 +5,12 @@ from typing import TypedDict, List, Dict, Any, Optional, Callable
 
 
 class PipelineState(TypedDict, total=False):
-    """State object for the video safety analysis pipeline."""
+    """State object for the media safety analysis pipeline (video + image)."""
     
     # Input
-    video_path: str
+    video_path: str  # Legacy name, supports both video and image paths
+    media_path: str  # Preferred: unified media path
+    media_type: str  # "video" or "image" - from MediaType enum
     policy_config: Dict[str, Any]
     
     # Generic evaluation criteria (user-defined)
@@ -22,6 +24,9 @@ class PipelineState(TypedDict, total=False):
     # Working directory
     work_dir: str
     video_id: str
+    
+    # Reprocessing flag
+    is_reprocessing: bool
     
     # Video metadata
     duration: float
@@ -42,9 +47,29 @@ class PipelineState(TypedDict, total=False):
     # Model outputs
     vision_detections: List[Dict[str, Any]]  # YOLO26 detections
     yoloworld_detections: List[Dict[str, Any]]  # YOLO-World detections
-    violence_segments: List[Dict[str, Any]]
+    violence_segments: List[Dict[str, Any]]  # X-CLIP violence detection
     transcript: Dict[str, Any]  # {full_text, chunks}
     ocr_results: List[Dict[str, Any]]
+    
+    # ==== NEW: Enhanced Violence Detection Stack ====
+    # Candidate window mining outputs
+    candidate_windows: List[Dict[str, Any]]  # {start_time, end_time, reason, score, cues}
+    window_mining_debug: Dict[str, Any]  # Motion scores, cues for audit
+    
+    # VideoMAE violence detection outputs (parallel to X-CLIP)
+    videomae_scores: List[Dict[str, Any]]  # {window_idx, start_time, end_time, score, label}
+    
+    # Pose-based violence heuristics outputs
+    pose_signals: List[Dict[str, Any]]  # {timestamp, signal_type, confidence, reason, persons}
+    pose_keypoints: List[Dict[str, Any]]  # Raw pose detections if available
+    
+    # ==== END Enhanced Violence Detection ====
+    
+    # ==== NSFW Visual Detection (Sexual Content) ====
+    # Industry Standard: Requires visual confirmation for sexual content scoring
+    # Profanity alone ≠ Sexual content
+    nsfw_results: Dict[str, Any]  # {is_nsfw, nsfw_score, nsfw_frames, detections}
+    # ==== END NSFW Detection ====
     
     # Text moderation results
     transcript_moderation: List[Dict[str, Any]]
@@ -55,6 +80,9 @@ class PipelineState(TypedDict, total=False):
     violations: List[Dict[str, Any]]
     verdict: str
     confidence: float
+    
+    # ==== NEW: Enhanced Fusion Debug ====
+    fusion_debug: Dict[str, Any]  # Reliability weights, missing signals, calibration info
     
     # Stage execution tracking (from PipelineRunner)
     stage_runs: List[Dict[str, Any]]

@@ -1,10 +1,12 @@
 """
 Whisper ASR stage plugin - wraps the existing audio_asr node.
+
+VIDEO ONLY: Requires audio track for transcription.
 """
 import asyncio
 from typing import Any, Dict, Set
 
-from app.pipeline.stages.base import StagePlugin, StageSpec
+from app.pipeline.stages.base import StagePlugin, StageSpec, VIDEO_ONLY, MediaType
 from app.core.logging import get_logger
 
 logger = get_logger("stages.whisper")
@@ -16,6 +18,8 @@ class WhisperStagePlugin(StagePlugin):
     
     Wraps the existing run_audio_asr node function.
     The node handles transcription and stage output saving.
+    
+    VIDEO ONLY: Requires audio track (images have no audio).
     """
     
     @property
@@ -25,6 +29,11 @@ class WhisperStagePlugin(StagePlugin):
     @property
     def display_name(self) -> str:
         return "Speech Analysis"
+    
+    @property
+    def supported_media_types(self) -> Set[MediaType]:
+        """Whisper requires audio (video only)."""
+        return VIDEO_ONLY
     
     @property
     def input_keys(self) -> Set[str]:

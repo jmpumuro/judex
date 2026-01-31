@@ -344,13 +344,14 @@ async def process_evaluation_item(
     evaluation_id: str,
     item_id: str,
     video_path: str,
-    criteria: EvaluationCriteria
+    criteria: EvaluationCriteria,
+    media_type: str = "video"  # "video" or "image"
 ) -> None:
-    """Process a single evaluation item."""
+    """Process a single evaluation item (video or image)."""
     from app.pipeline.graph import run_pipeline
     from app.api.sse import broadcast_progress
     
-    logger.info(f"Processing item {item_id} for evaluation {evaluation_id}")
+    logger.info(f"Processing {media_type} item {item_id} for evaluation {evaluation_id}")
     
     # Update item status
     EvaluationRepository.update_item(
@@ -373,7 +374,8 @@ async def process_evaluation_item(
             video_path=video_path,
             criteria=criteria,
             video_id=item_id,
-            progress_callback=progress_callback
+            progress_callback=progress_callback,
+            media_type=media_type,  # Pass media type to pipeline
         )
         
         # Save result - criteria comes directly from fusion node now
@@ -467,7 +469,8 @@ async def process_evaluation(evaluation_id: str, items_data: List[Dict]) -> None
             evaluation_id=evaluation_id,
             item_id=item_data["item_id"],
             video_path=item_data["video_path"],
-            criteria=criteria
+            criteria=criteria,
+            media_type=item_data.get("media_type", "video"),
         )
     
     logger.info(f"Evaluation {evaluation_id} complete")
@@ -540,8 +543,11 @@ async def create_evaluation(
     
     items_data = []
     
-    # Handle file uploads
+    # Handle file uploads (video and image)
     storage = get_storage_service()
+    
+    # Import media utilities
+    from app.utils.media import detect_media_type, MediaType, get_all_supported_extensions
     
     if files:
         for file in files:
@@ -554,16 +560,22 @@ async def create_evaluation(
             with open(temp_path, "wb") as f:
                 shutil.copyfileobj(file.file, f)
             
+            # Detect media type (video or image)
+            media_type = detect_media_type(str(temp_path))
+            if media_type == MediaType.UNKNOWN:
+                logger.warning(f"Unsupported file type: {file.filename}")
+                continue
+            
             # Generate item ID first
             item_id = str(uuid.uuid4())[:8]
             
-            # Upload original video to MinIO
+            # Upload original media to MinIO
             uploaded_path = None
             try:
                 uploaded_path = storage.upload_video(str(temp_path), item_id)
-                logger.info(f"Uploaded video to MinIO: {uploaded_path}")
+                logger.info(f"Uploaded {media_type.value} to MinIO: {uploaded_path}")
             except Exception as e:
-                logger.warning(f"Failed to upload video to MinIO: {e}")
+                logger.warning(f"Failed to upload {media_type.value} to MinIO: {e}")
             
             # Add item with uploaded path
             EvaluationRepository.add_item(
@@ -576,7 +588,9 @@ async def create_evaluation(
             
             items_data.append({
                 "item_id": item_id,
-                "video_path": str(temp_path)
+                "video_path": str(temp_path),  # Legacy name for backward compatibility
+                "media_path": str(temp_path),  # New unified name
+                "media_type": media_type.value,
             })
     
     # Handle URL imports
@@ -618,6 +632,75 @@ async def create_evaluation(
     
     return evaluation
 
+
+# =============================================================================
+# Recovery Endpoints - MUST be before parameterized routes!
+# =============================================================================
+
+@router.get("/evaluations/stuck")
+async def list_stuck_evaluations():
+    """
+    List all evaluations that appear stuck (PROCESSING status for too long).
+    
+    Useful for monitoring. Use POST /evaluations/{id}/reprocess to resume.
+    """
+    from datetime import datetime, timedelta
+    
+    stuck_threshold = timedelta(minutes=10)  # Industry standard: catch stuck faster
+    cutoff = datetime.utcnow() - stuck_threshold
+    
+    with get_session() as session:
+        stuck = session.query(Evaluation).filter(
+            Evaluation.status == DBEvaluationStatus.PROCESSING,
+            Evaluation.started_at < cutoff
+        ).all()
+        
+        return {
+            "stuck_count": len(stuck),
+            "stuck_evaluations": [
+                {
+                    "id": e.id,
+                    "status": e.status.value,
+                    "started_at": e.started_at.isoformat() if e.started_at else None,
+                    "current_stage": e.current_stage,
+                    "items_completed": e.items_completed,
+                    "items_total": e.items_total,
+                    "error_message": e.error_message,
+                    "recovery_hint": f"POST /v1/evaluations/{e.id}/reprocess"
+                }
+                for e in stuck
+            ]
+        }
+
+
+@router.post("/evaluations/recover-all")
+async def recover_all_stuck_evaluations_endpoint(background_tasks: BackgroundTasks):
+    """
+    Trigger recovery for ALL stuck evaluations.
+    
+    This is equivalent to what happens automatically on container restart.
+    Uses existing reprocess infrastructure (no redundant code).
+    """
+    from app.pipeline.recovery import recover_all_stuck_evaluations
+    
+    async def do_recovery():
+        try:
+            result = await recover_all_stuck_evaluations()
+            logger.info(f"Bulk recovery complete: {result}")
+        except Exception as e:
+            logger.error(f"Bulk recovery failed: {e}")
+    
+    background_tasks.add_task(do_recovery)
+    
+    return {
+        "status": "recovery_started",
+        "message": "Recovery of all stuck evaluations initiated in background"
+    }
+
+
+# =============================================================================
+# Parameterized routes (MUST be after static routes like /stuck)
+# =============================================================================
 
 @router.get("/evaluations/{evaluation_id}", response_model=EvaluationDTO)
 async def get_evaluation(evaluation_id: str, include_items: bool = Query(True)):
@@ -717,15 +800,28 @@ async def get_evaluation_artifact(
     if not item:
         raise HTTPException(400, "item_id required for multi-item evaluations")
     
-    # Get artifact path
+    # Get artifact path and determine content type
     path = None
     content_type = "application/octet-stream"
+    
+    # Helper to detect content type from path
+    def get_content_type(file_path: str) -> str:
+        ext = Path(file_path).suffix.lower()
+        content_types = {
+            ".mp4": "video/mp4", ".avi": "video/x-msvideo", ".mov": "video/quicktime",
+            ".mkv": "video/x-matroska", ".webm": "video/webm",
+            ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+            ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp",
+        }
+        return content_types.get(ext, "application/octet-stream")
+    
     if artifact_type == "labeled_video":
         path = item.labeled_video_path
-        content_type = "video/mp4"
+        content_type = get_content_type(path) if path else "video/mp4"
     elif artifact_type == "uploaded_video":
         path = item.uploaded_video_path
-        content_type = "video/mp4"
+        # Auto-detect content type (could be video or image)
+        content_type = get_content_type(path) if path else "video/mp4"
     elif artifact_type == "thumbnail":
         path = item.thumbnail_path
         content_type = "image/jpeg"
@@ -740,6 +836,9 @@ async def get_evaluation_artifact(
     
     storage = get_storage_service()
     
+    # Get file extension for Content-Disposition
+    file_ext = Path(path).suffix or ".mp4"
+    
     # Stream content directly (recommended for browsers)
     if stream:
         try:
@@ -749,7 +848,7 @@ async def get_evaluation_artifact(
                 content=content,
                 media_type=content_type,
                 headers={
-                    "Content-Disposition": f'inline; filename="{artifact_type}_{item.id}.mp4"',
+                    "Content-Disposition": f'inline; filename="{artifact_type}_{item.id}{file_ext}"',
                     "Cache-Control": "max-age=3600"
                 }
             )
@@ -1060,17 +1159,28 @@ async def reprocess_evaluation(
         item_id = item_info["id"]
         uploaded_path = item_info["uploaded_video_path"]
         
-        # Reset item status
+        # Reset item status and clear stage outputs for stages that will be rerun
         with get_session() as session:
             db_item = session.query(EvaluationItem).filter(EvaluationItem.id == item_id).first()
             if db_item:
                 db_item.status = DBEvaluationStatus.PROCESSING
                 db_item.progress = 0
                 db_item.current_stage = "reprocessing"
-                # Keep stage_outputs but clear result for re-scoring
+                
+                # Keep ingest and segment stage outputs, clear everything else
+                existing_outputs = db_item.stage_outputs or {}
+                preserved_outputs = {}
+                for stage_key in ["ingest", "segment", "ingest_video", "segment_video"]:
+                    if stage_key in existing_outputs:
+                        preserved_outputs[stage_key] = existing_outputs[stage_key]
+                db_item.stage_outputs = preserved_outputs
+                
+                # Clear result for re-scoring
                 if db_item.result:
                     session.delete(db_item.result)
                 session.commit()
+                
+                logger.info(f"Cleared stage outputs for reprocessing, preserved: {list(preserved_outputs.keys())}")
         
         # Get video path - try uploaded video from MinIO first
         video_path = None
@@ -1135,28 +1245,51 @@ async def reprocess_evaluation_item(
     """
     Reprocess a single evaluation item.
     
-    Uses proper LangGraph checkpointing:
-    - If resume_from_checkpoint=True, continues from last checkpoint
-    - All state is properly serialized and restored
+    Skips ingest and segment stages if data already exists,
+    re-runs all analysis stages (yolo26, yoloworld, violence, whisper, ocr, etc.)
     """
     from app.pipeline.graph import run_pipeline
     from app.api.sse import sse_manager
     
-    logger.info(f"Reprocessing item {item_id} (resume_from_checkpoint={resume_from_checkpoint})")
+    logger.info(f"Reprocessing item {item_id} (skip_early_stages={resume_from_checkpoint})")
     
     try:
+        # Get existing item data to preserve ingest/segment outputs
+        existing_state = {}
+        with get_session() as session:
+            db_item = session.query(EvaluationItem).filter(EvaluationItem.id == item_id).first()
+            if db_item:
+                # Load metadata from existing item
+                existing_state = {
+                    "duration": db_item.duration,
+                    "fps": db_item.fps,
+                    "width": db_item.width,
+                    "height": db_item.height,
+                    "has_audio": db_item.has_audio,
+                    "uploaded_video_path": db_item.uploaded_video_path,
+                    "labeled_video_path": db_item.labeled_video_path,
+                    "thumbnail_path": db_item.thumbnail_path,
+                }
+                # Load preserved stage outputs (ingest/segment)
+                if db_item.stage_outputs:
+                    for key, value in db_item.stage_outputs.items():
+                        existing_state[f"stage_output_{key}"] = value
+                
+                logger.info(f"Loaded existing item data: duration={db_item.duration}, fps={db_item.fps}, has_audio={db_item.has_audio}")
+        
         # Progress callback
         async def progress_callback(stage: str, message: str, progress: int):
             EvaluationRepository.update_item_stage(item_id, stage, progress)
             await sse_manager.send_progress(evaluation_id, stage, message, progress)
         
-        # Run pipeline with checkpointing support
+        # Run pipeline - it will skip ingest/segment if data exists
         result = await run_pipeline(
             video_path=video_path,
             criteria=criteria,
             video_id=item_id,
             progress_callback=progress_callback,
             resume_from_checkpoint=resume_from_checkpoint,
+            existing_state=existing_state,  # Pass existing data
         )
         
         # Save result
@@ -1169,7 +1302,8 @@ async def reprocess_evaluation_item(
                 item.status = DBEvaluationStatus.COMPLETED
                 item.progress = 100
                 item.current_stage = None
-                item.stage_outputs = result.get("stage_outputs", {})
+                # NOTE: Don't overwrite stage_outputs - they were saved incrementally during pipeline execution
+                # item.stage_outputs = result.get("stage_outputs", {})  # REMOVED - was wiping saved outputs
                 
                 # Create new result
                 db_result = EvaluationResult(
@@ -1201,3 +1335,5 @@ async def reprocess_evaluation_item(
                 session.commit()
         
         EvaluationRepository.update_evaluation_counts(evaluation_id)
+
+

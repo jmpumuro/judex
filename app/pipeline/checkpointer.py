@@ -30,6 +30,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.pipeline.serializer import get_numpy_safe_serializer
 
 logger = get_logger("checkpointer")
 
@@ -64,7 +65,7 @@ def _ensure_tables_exist():
     # Setup tables using autocommit connection
     # This is required because CREATE INDEX CONCURRENTLY cannot run in a transaction
     with psycopg.connect(database_url, autocommit=True) as setup_conn:
-        setup_saver = PostgresSaver(setup_conn)
+        setup_saver = PostgresSaver(setup_conn, serde=get_numpy_safe_serializer())
         setup_saver.setup()
         logger.info("✓ Checkpoint tables created/verified")
 
@@ -83,10 +84,10 @@ def get_checkpointer() -> PostgresSaver:
             logger.info("Initializing sync PostgreSQL checkpointer")
             
             _ensure_tables_exist()
-            
+
             conn = psycopg.connect(database_url)
-            _sync_checkpointer = PostgresSaver(conn)
-            
+            _sync_checkpointer = PostgresSaver(conn, serde=get_numpy_safe_serializer())
+
             logger.info("✓ Sync PostgreSQL checkpointer initialized")
             
         except Exception as e:
@@ -120,9 +121,9 @@ async def get_async_checkpointer() -> AsyncPostgresSaver:
                 open=False,  # Don't open yet
             )
             await _async_connection_pool.open()
-            
-            _async_checkpointer = AsyncPostgresSaver(_async_connection_pool)
-            
+
+            _async_checkpointer = AsyncPostgresSaver(_async_connection_pool, serde=get_numpy_safe_serializer())
+
             logger.info("✓ Async PostgreSQL checkpointer initialized")
             
         except Exception as e:

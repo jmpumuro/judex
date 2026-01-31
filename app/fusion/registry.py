@@ -10,7 +10,8 @@ from app.fusion.strategies import (
     WeightedSumStrategy,
     MaxStrategy,
     AverageStrategy,
-    RuleBasedStrategy
+    RuleBasedStrategy,
+    ReliabilityWeightedStrategy,
 )
 
 
@@ -90,3 +91,4 @@ FusionRegistry.register(FusionStrategyEnum.WEIGHTED_SUM.value, WeightedSumStrate
 FusionRegistry.register(FusionStrategyEnum.MAX.value, MaxStrategy)
 FusionRegistry.register(FusionStrategyEnum.AVERAGE.value, AverageStrategy)
 FusionRegistry.register(FusionStrategyEnum.RULE_BASED.value, RuleBasedStrategy)
+FusionRegistry.register("reliability_weighted", ReliabilityWeightedStrategy)

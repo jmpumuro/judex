@@ -134,8 +134,14 @@ async def list_all_stages():
     
     # Get builtin stages from main registry
     registry = get_stage_registry()
-    # All builtin detector stage types
-    builtin_types = {"yolo26", "yoloworld", "xclip", "violence", "whisper", "ocr", "text_moderation"}
+    # All builtin detector stage types (including new safety stack)
+    builtin_types = {
+        "yolo26", "yoloworld", "xclip", "violence", "whisper", "ocr", "text_moderation",
+        # New safety stack stages
+        "window_mining", "videomae_violence", "pose_heuristics",
+        # NSFW visual detection (reduces sexual false positives)
+        "nsfw_detection"
+    }
     
     with get_db_session() as session:
         # Only add builtin stages from the registry (external stages added separately below)

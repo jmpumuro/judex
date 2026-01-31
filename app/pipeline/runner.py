@@ -4,24 +4,86 @@ Pipeline runner for dynamic stage execution.
 The PipelineRunner executes a sequence of stages based on a pipeline definition.
 This is the core orchestration layer that:
 - Resolves stage plugins from the registry
-- Executes stages in order
+- Executes stages in order (or in parallel phases)
 - Manages state updates and progress callbacks
 - Handles errors consistently
 - Tracks skipped stages explicitly
+- Respects media type compatibility (video vs image)
 
-The runner is called from within a single LangGraph node (run_pipeline),
-keeping the LangGraph structure stable while allowing dynamic stage execution.
+Industry Standard Architecture:
+- Plugin Pattern: Stages are self-contained plugins with defined interfaces
+- Registry Pattern: Dynamic stage discovery and resolution
+- Phase-based Execution: Independent stages can run in parallel
+- Dependency Declaration: Stages declare inputs/outputs for automatic ordering
+- Media Type Awareness: Stages declare supported media types
 """
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
+from enum import Enum
 
-from app.pipeline.stages.base import StageSpec, StageStatus, StageImpact
+from app.pipeline.stages.base import StageSpec, StageStatus, StageImpact, MediaType
 from app.pipeline.stages.registry import get_stage_registry
 from app.core.logging import get_logger
 
 logger = get_logger("pipeline.runner")
+
+
+# ============================================================================
+# Phase Definitions for Parallel Execution
+# ============================================================================
+
+class ExecutionPhase(str, Enum):
+    """
+    Execution phases for stage grouping.
+    
+    Stages in the same phase can run in parallel if they don't have
+    data dependencies. Phases execute sequentially.
+    """
+    INGEST = "ingest"           # Video ingestion and normalization
+    EXTRACT = "extract"         # Frame extraction, segmentation
+    PREPROCESS = "preprocess"   # Window mining, quick detection passes
+    DETECT = "detect"           # Main detection (can run in parallel)
+    ANALYZE = "analyze"         # Text analysis, moderation
+    FUSE = "fuse"               # Score fusion and verdict
+    REPORT = "report"           # Report generation
+
+
+# Stage to phase mapping
+STAGE_PHASES: Dict[str, ExecutionPhase] = {
+    # Ingest phase
+    "ingest": ExecutionPhase.INGEST,
+    
+    # Extract phase
+    "segment": ExecutionPhase.EXTRACT,
+    
+    # Preprocess phase (quick passes for window mining)
+    "yolo26": ExecutionPhase.PREPROCESS,
+    "window_mining": ExecutionPhase.PREPROCESS,
+    
+    # Detect phase (parallel detection)
+    "yoloworld": ExecutionPhase.DETECT,
+    "xclip": ExecutionPhase.DETECT,
+    "videomae_violence": ExecutionPhase.DETECT,
+    "pose_heuristics": ExecutionPhase.DETECT,
+    "whisper": ExecutionPhase.DETECT,
+    "ocr": ExecutionPhase.DETECT,
+    
+    # Analyze phase
+    "text_moderation": ExecutionPhase.ANALYZE,
+    
+    # Fuse phase
+    "policy_fusion": ExecutionPhase.FUSE,
+    
+    # Report phase
+    "report": ExecutionPhase.REPORT,
+}
+
+
+def get_stage_phase(stage_type: str) -> ExecutionPhase:
+    """Get the execution phase for a stage type."""
+    return STAGE_PHASES.get(stage_type, ExecutionPhase.DETECT)
 
 
 @dataclass
@@ -124,10 +186,47 @@ class PipelineRunner:
         
         logger.info(f"Starting pipeline with {total_stages} stages")
         
+        # Get media type from state (default to video for backward compatibility)
+        media_type = state.get("media_type", "video")
+        
         for idx, spec in enumerate(stages):
             # Calculate overall progress
             base_progress = int((idx / total_stages) * 100)
             stage_progress = int(((idx + 1) / total_stages) * 100)
+            
+            # Check media type compatibility first
+            try:
+                plugin = self.registry.get(spec.type)
+                if not plugin.supports_media_type(media_type):
+                    skip_reason = f"Not supported for {media_type} (requires video)"
+                    logger.info(f"Skipping stage {spec.id}: {skip_reason}")
+                    
+                    skipped_run = StageRun(
+                        stage_id=spec.id,
+                        stage_type=spec.type,
+                        status=StageStatus.SKIPPED,
+                        started_at=time.time(),
+                        ended_at=time.time(),
+                        duration_ms=0.0,
+                        skip_reason=skip_reason,
+                        impact=spec.impact.value if isinstance(spec.impact, StageImpact) else spec.impact,
+                    )
+                    stage_runs.append(skipped_run)
+                    
+                    # Save skipped stage output
+                    video_id = state.get("video_id")
+                    if video_id:
+                        from app.utils.progress import save_stage_output
+                        save_stage_output(video_id, spec.id, {
+                            "status": "skipped",
+                            "skip_reason": skip_reason,
+                            "media_type": media_type,
+                            "impact": spec.impact.value if isinstance(spec.impact, StageImpact) else spec.impact,
+                        })
+                    continue
+            except KeyError:
+                # Plugin not found - will be handled later
+                pass
             
             # Handle disabled stages explicitly - record them as SKIPPED
             if not spec.enabled:
@@ -290,6 +389,271 @@ class PipelineRunner:
             success=len(errors) == 0,
             errors=errors,
         )
+    
+    async def run_parallel(
+        self,
+        stages: List[StageSpec],
+        initial_state: Dict[str, Any],
+        max_parallel: int = 3,
+    ) -> PipelineRunResult:
+        """
+        Execute the pipeline with phase-based parallel execution.
+        
+        Industry Standard: Stages are grouped by phase. Stages within the same
+        phase run in parallel (up to max_parallel), phases execute sequentially.
+        
+        This provides:
+        - Faster execution for independent stages (e.g., xclip + videomae + pose)
+        - Deterministic ordering via phase boundaries
+        - Resource management via max_parallel limit
+        
+        Args:
+            stages: List of stage specifications to execute
+            initial_state: Initial pipeline state
+            max_parallel: Max concurrent stages per phase (default 3)
+            
+        Returns:
+            PipelineRunResult with execution details
+        """
+        state = dict(initial_state)
+        all_stage_runs: List[StageRun] = []
+        errors: List[str] = []
+        
+        pipeline_start = time.time()
+        
+        # Group stages by phase
+        phase_groups: Dict[ExecutionPhase, List[StageSpec]] = {}
+        for spec in stages:
+            phase = get_stage_phase(spec.type)
+            if phase not in phase_groups:
+                phase_groups[phase] = []
+            phase_groups[phase].append(spec)
+        
+        # Sort phases by enum order
+        sorted_phases = sorted(
+            phase_groups.keys(),
+            key=lambda p: list(ExecutionPhase).index(p)
+        )
+        
+        logger.info(
+            f"Starting parallel pipeline: {len(stages)} stages in "
+            f"{len(sorted_phases)} phases, max_parallel={max_parallel}"
+        )
+        
+        total_completed = 0
+        total_stages = len(stages)
+        
+        # Get media type for compatibility checks
+        media_type = state.get("media_type", "video")
+        
+        for phase in sorted_phases:
+            phase_stages = phase_groups[phase]
+            logger.info(f"Phase {phase.value}: {len(phase_stages)} stages")
+            
+            # Handle disabled and incompatible stages first (no async needed)
+            enabled_stages = []
+            for spec in phase_stages:
+                # Check media type compatibility
+                try:
+                    plugin = self.registry.get(spec.type)
+                    if not plugin.supports_media_type(media_type):
+                        skip_reason = f"Not supported for {media_type} (requires video)"
+                        skipped_run = StageRun(
+                            stage_id=spec.id,
+                            stage_type=spec.type,
+                            status=StageStatus.SKIPPED,
+                            started_at=time.time(),
+                            ended_at=time.time(),
+                            duration_ms=0.0,
+                            skip_reason=skip_reason,
+                            impact=spec.impact.value if isinstance(spec.impact, StageImpact) else spec.impact,
+                        )
+                        all_stage_runs.append(skipped_run)
+                        total_completed += 1
+                        continue
+                except KeyError:
+                    pass  # Will fail later with proper error
+                
+                # Check if disabled
+                if not spec.enabled:
+                    skip_reason = spec.skip_reason or "Disabled by configuration"
+                    skipped_run = StageRun(
+                        stage_id=spec.id,
+                        stage_type=spec.type,
+                        status=StageStatus.SKIPPED,
+                        started_at=time.time(),
+                        ended_at=time.time(),
+                        duration_ms=0.0,
+                        skip_reason=skip_reason,
+                        impact=spec.impact.value if isinstance(spec.impact, StageImpact) else spec.impact,
+                    )
+                    all_stage_runs.append(skipped_run)
+                    total_completed += 1
+                else:
+                    enabled_stages.append(spec)
+            
+            if not enabled_stages:
+                continue
+            
+            # Run enabled stages in parallel batches
+            for batch_start in range(0, len(enabled_stages), max_parallel):
+                batch = enabled_stages[batch_start:batch_start + max_parallel]
+                
+                # Create tasks for parallel execution
+                tasks = [
+                    self._run_single_stage(spec, state, total_completed, total_stages)
+                    for spec in batch
+                ]
+                
+                # Execute batch in parallel
+                batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                # Process results
+                for spec, result in zip(batch, batch_results):
+                    if isinstance(result, Exception):
+                        error_msg = f"Stage {spec.id} failed: {str(result)}"
+                        logger.error(error_msg)
+                        
+                        failed_run = StageRun(
+                            stage_id=spec.id,
+                            stage_type=spec.type,
+                            status=StageStatus.FAILED,
+                            started_at=time.time(),
+                            error=str(result),
+                            impact=spec.impact.value if isinstance(spec.impact, StageImpact) else spec.impact,
+                        )
+                        all_stage_runs.append(failed_run)
+                        errors.append(error_msg)
+                        state.setdefault("errors", []).append(error_msg)
+                        
+                        if self.stop_on_error:
+                            break
+                    else:
+                        stage_run, updated_state = result
+                        all_stage_runs.append(stage_run)
+                        # Merge state updates (parallel stages may write different keys)
+                        state.update(updated_state)
+                    
+                    total_completed += 1
+                
+                if self.stop_on_error and errors:
+                    break
+            
+            if self.stop_on_error and errors:
+                break
+        
+        # Calculate total duration
+        total_duration_ms = (time.time() - pipeline_start) * 1000
+        
+        # Store stage runs in state
+        state["stage_runs"] = [r.to_dict() for r in all_stage_runs]
+        state.pop("progress_callback", None)
+        
+        completed_count = sum(1 for r in all_stage_runs if r.status == StageStatus.COMPLETED)
+        logger.info(
+            f"Parallel pipeline complete: {len(all_stage_runs)} stages, "
+            f"{completed_count} succeeded, {len(errors)} errors, "
+            f"total time: {total_duration_ms:.0f}ms"
+        )
+        
+        return PipelineRunResult(
+            stages_run=all_stage_runs,
+            final_state=state,
+            total_duration_ms=total_duration_ms,
+            success=len(errors) == 0,
+            errors=errors,
+        )
+    
+    async def _run_single_stage(
+        self,
+        spec: StageSpec,
+        state: Dict[str, Any],
+        completed_count: int,
+        total_stages: int,
+    ) -> tuple:
+        """
+        Run a single stage and return the result.
+        
+        Used by run_parallel for concurrent execution.
+        
+        Returns:
+            Tuple of (StageRun, updated_state_dict)
+        """
+        run = StageRun(
+            stage_id=spec.id,
+            stage_type=spec.type,
+            status=StageStatus.RUNNING,
+            started_at=time.time(),
+            impact=spec.impact.value if isinstance(spec.impact, StageImpact) else spec.impact,
+        )
+        
+        # Copy state to avoid race conditions
+        local_state = dict(state)
+        local_state["progress_callback"] = self.progress_callback
+        
+        base_progress = int((completed_count / total_stages) * 100)
+        
+        try:
+            plugin = self.registry.get(spec.type)
+            
+            await self._send_progress(
+                spec.type,
+                f"Starting {plugin.display_name}...",
+                base_progress
+            )
+            
+            local_state["current_stage"] = spec.type
+            local_state["stage_progress"] = 0
+            
+            # Validate and execute
+            validation_error = plugin.validate_state(local_state, spec)
+            if validation_error:
+                raise ValueError(f"Stage validation failed: {validation_error}")
+            
+            updated_state = await plugin.run(local_state, spec)
+            
+            if isinstance(updated_state, dict):
+                local_state.update(updated_state)
+            
+            # Get stage output
+            stage_output = plugin.get_stage_output(local_state)
+            run.outputs = stage_output
+            
+            # Save external stage outputs
+            video_id = local_state.get("video_id")
+            if video_id and stage_output and plugin.is_external:
+                from app.utils.progress import save_stage_output, format_stage_output
+                formatted_output = format_stage_output(
+                    spec.id,
+                    is_external=True,
+                    endpoint_called=True,
+                    **{k: v for k, v in stage_output.items() if not k.startswith('_')}
+                )
+                save_stage_output(video_id, spec.id, formatted_output)
+            
+            run.status = StageStatus.COMPLETED
+            run.ended_at = time.time()
+            run.duration_ms = (run.ended_at - run.started_at) * 1000
+            
+            logger.info(f"Stage {spec.id} completed in {run.duration_ms:.0f}ms")
+            
+            await self._send_progress(
+                spec.type,
+                f"{plugin.display_name} complete",
+                base_progress + int(100 / total_stages)
+            )
+            
+            # Remove non-serializable items
+            local_state.pop("progress_callback", None)
+            
+            return (run, local_state)
+            
+        except Exception as e:
+            run.status = StageStatus.FAILED
+            run.error = str(e)
+            run.ended_at = time.time()
+            run.duration_ms = (run.ended_at - run.started_at) * 1000
+            raise
     
     async def _send_progress(
         self,

@@ -333,9 +333,20 @@ class HealthResponse(BaseModel):
 
 class ModelInfo(BaseModel):
     """Information about a loaded model."""
-    name: str
-    loaded: bool = False
+    model_id: str
+    model_type: str  # vision, violence_xclip, violence_videomae, pose_heuristics, asr, moderation, llm
+    cached: bool = False
+    status: str = "unknown"  # ready, loading, error, disabled
     device: Optional[str] = None
+    
+    # Alias for backward compatibility
+    @property
+    def name(self) -> str:
+        return self.model_id
+    
+    @property
+    def loaded(self) -> bool:
+        return self.status == "ready"
 
 
 class ModelsListResponse(BaseModel):

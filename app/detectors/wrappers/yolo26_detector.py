@@ -23,11 +23,18 @@ class YOLO26DetectorWrapper(BaseDetector):
     detector_type = DetectorType.YOLO26.value
     
     # Category mappings for safety-relevant objects
+    # Research-backed: Generic containers (bottle, cup, glass) are NOT drug indicators
+    # They have extremely high false positive rates in content moderation
+    # Only specific paraphernalia should trigger substance category
     SAFETY_CATEGORIES = {
         "weapon": ["knife", "gun", "rifle", "sword", "pistol", "firearm"],
-        "substance": ["bottle", "wine glass", "cup", "cigarette"],
+        "substance": ["cigarette", "syringe", "pipe"],  # Specific paraphernalia only
         "dangerous": ["scissors", "fire", "explosion"],
     }
+    
+    # Common objects that should NOT trigger safety flags
+    # (frequently misclassified as substance-related)
+    BENIGN_OBJECTS = {"bottle", "wine glass", "cup", "glass", "mug"}
     
     def __init__(self, spec: DetectorSpec):
         super().__init__(spec)

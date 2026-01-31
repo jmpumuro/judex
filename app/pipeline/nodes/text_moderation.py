@@ -101,7 +101,35 @@ def run_text_moderation(state: PipelineState) -> PipelineState:
         ocr_items_analyzed=len(ocr_moderation),
         flagged_transcript_count=len(flagged_transcript),
         flagged_ocr_count=len(flagged_ocr),
-        # Include flagged items for preview
+        # Include full moderation results for UI display
+        transcript_moderation=[
+            {
+                "text": m.get("text", "")[:200],
+                "start_time": m.get("start_time"),
+                "end_time": m.get("end_time"),
+                "profanity_score": round(m.get("profanity_score", 0), 3),
+                "violence_score": round(m.get("violence_score", 0), 3),
+                "sexual_score": round(m.get("sexual_score", 0), 3),
+                "drugs_score": round(m.get("drugs_score", 0), 3),
+                "hate_score": round(m.get("hate_score", 0), 3),
+                "profanity_words": m.get("profanity_words", []),
+                "sexual_words": m.get("sexual_words", [])
+            }
+            for m in transcript_moderation[:10]
+        ],
+        ocr_moderation=[
+            {
+                "text": m.get("text", "")[:100],
+                "timestamp": m.get("timestamp"),
+                "profanity_score": round(m.get("profanity_score", 0), 3),
+                "violence_score": round(m.get("violence_score", 0), 3),
+                "sexual_score": round(m.get("sexual_score", 0), 3),
+                "drugs_score": round(m.get("drugs_score", 0), 3),
+                "hate_score": round(m.get("hate_score", 0), 3)
+            }
+            for m in ocr_moderation[:10]
+        ],
+        # Legacy: flagged items for backward compatibility
         flagged_transcript=[
             {
                 "text": m.get("text", "")[:100],

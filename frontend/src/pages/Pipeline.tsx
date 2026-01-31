@@ -2,7 +2,8 @@ import { FC, useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { 
   Upload, Plus, Video, Play, Trash2,
   RotateCcw, Loader2, Link, Database, Cloud,
-  Check, Circle, AlertCircle, X, Eye, ChevronDown, Info
+  Check, Circle, AlertCircle, X, Eye, ChevronDown, Info, Diamond,
+  Image as ImageIcon
 } from 'lucide-react'
 import { 
   useVideoStore, 
@@ -17,6 +18,7 @@ import { evaluationApi, stageApi, createSSEConnection, api, stagesApi, StageInfo
 import { evaluations as evaluationsApi } from '@/api'
 import { ProcessedFrames } from '@/components/pipeline/ProcessedFrames'
 import PipelineStages, { PipelineStage } from '@/components/pipeline/PipelineStages'
+import { ReportChat } from '@/components/chat/ReportChat'
 import ReactMarkdown from 'react-markdown'
 import toast from 'react-hot-toast'
 
@@ -27,36 +29,327 @@ interface CriteriaPreset {
   criteria_count: number
 }
 
+// Detection with bounding box for visualization
+interface Detection {
+  label: string
+  confidence: number
+  timestamp: number
+  bbox?: { x1: number; y1: number; x2: number; y2: number }
+  category?: string
+}
+
+// Component to display a frame with bounding box overlays
+const DetectionViewer: FC<{
+  detections: Detection[]
+  evaluationId: string
+  itemId: string
+  maxDisplay?: number
+}> = ({ detections, evaluationId, itemId, maxDisplay = 3 }) => {
+  const [selectedIdx, setSelectedIdx] = useState(0)
+  const [imageSize, setImageSize] = useState({ width: 0, height: 0 })
+  const imgRef = useRef<HTMLImageElement>(null)
+  
+  // Filter detections that have bboxes and are flagged (weapons, substances, etc.)
+  const flaggedDetections = detections.filter(d => 
+    d.bbox && (d.category === 'weapon' || d.category === 'substance' || d.category === 'dangerous' || d.confidence > 0.7)
+  ).slice(0, maxDisplay)
+  
+  if (flaggedDetections.length === 0) return null
+  
+  const currentDetection = flaggedDetections[selectedIdx] || flaggedDetections[0]
+  
+  // Build frame URL from timestamp
+  // Frame naming: frame_{index}_{timestamp_millis} (e.g., frame_0001_1000 for 1.0s)
+  // Use the same API_BASE as other endpoints (http://localhost:8012 in dev)
+  const frameIndex = Math.floor(currentDetection.timestamp)
+  const timestampMillis = Math.round(currentDetection.timestamp * 1000)
+  const apiBase = import.meta.env.VITE_API_URL || 'http://localhost:8012'
+  const frameUrl = `${apiBase}/v1/evaluations/${evaluationId}/frames/frame_${String(frameIndex).padStart(4, '0')}_${timestampMillis}?item_id=${itemId}&stream=true`
+  
+  // Calculate bbox position as percentages (assuming 1280x720 original)
+  const originalWidth = 1280
+  const originalHeight = 720
+  const bbox = currentDetection.bbox!
+  const boxStyle = {
+    left: `${(bbox.x1 / originalWidth) * 100}%`,
+    top: `${(bbox.y1 / originalHeight) * 100}%`,
+    width: `${((bbox.x2 - bbox.x1) / originalWidth) * 100}%`,
+    height: `${((bbox.y2 - bbox.y1) / originalHeight) * 100}%`,
+  }
+  
+  // Box color based on category
+  const boxColor = currentDetection.category === 'weapon' ? 'border-red-500' 
+    : currentDetection.category === 'substance' ? 'border-orange-500'
+    : currentDetection.category === 'dangerous' ? 'border-yellow-500'
+    : 'border-blue-500'
+  
+  return (
+    <div className="mt-2 space-y-2">
+      <div className="text-[10px] text-gray-500 uppercase tracking-wider">Flagged Detections</div>
+      
+      {/* Frame with bbox overlay */}
+      <div className="relative bg-gray-900 rounded overflow-hidden">
+        <img 
+          ref={imgRef}
+          src={frameUrl}
+          alt={`Detection at ${currentDetection.timestamp}s`}
+          className="w-full h-auto"
+          onLoad={(e) => {
+            const img = e.target as HTMLImageElement
+            setImageSize({ width: img.naturalWidth, height: img.naturalHeight })
+          }}
+          onError={(e) => {
+            // Hide on error
+            (e.target as HTMLImageElement).style.display = 'none'
+          }}
+        />
+        
+        {/* Bounding box overlay */}
+        <div 
+          className={`absolute border-2 ${boxColor} pointer-events-none`}
+          style={boxStyle}
+        >
+          {/* Label badge */}
+          <div className={`absolute -top-5 left-0 text-[10px] px-1.5 py-0.5 rounded ${
+            currentDetection.category === 'weapon' ? 'bg-red-500' 
+            : currentDetection.category === 'substance' ? 'bg-orange-500'
+            : 'bg-blue-500'
+          } text-white whitespace-nowrap`}>
+            {currentDetection.label} ({(currentDetection.confidence * 100).toFixed(0)}%)
+          </div>
+        </div>
+      </div>
+      
+      {/* Detection selector if multiple */}
+      {flaggedDetections.length > 1 && (
+        <div className="flex gap-1">
+          {flaggedDetections.map((det, i) => (
+            <button
+              key={i}
+              onClick={() => setSelectedIdx(i)}
+              className={`px-2 py-1 text-[10px] rounded ${
+                i === selectedIdx 
+                  ? 'bg-gray-700 text-white' 
+                  : 'bg-gray-900 text-gray-500 hover:text-white'
+              }`}
+            >
+              {det.label} @ {det.timestamp.toFixed(1)}s
+            </button>
+          ))}
+        </div>
+      )}
+      
+      {/* Detection info */}
+      <div className="text-xs text-gray-500">
+        <span className="text-gray-400">{currentDetection.timestamp.toFixed(1)}s</span>
+        <span className="mx-2">•</span>
+        <span className={currentDetection.category === 'weapon' ? 'text-red-400' : 'text-gray-400'}>
+          {currentDetection.category || 'object'}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+// Violence segment with score for visualization
+interface ViolenceSegment {
+  start_time: number
+  end_time: number
+  violence_score?: number
+  score?: number
+  label?: string
+}
+
+// Component to display frames from high-violence segments with consistent container
+const ViolenceFrameViewer: FC<{
+  segments: ViolenceSegment[]
+  evaluationId: string
+  itemId: string
+  maxDisplay?: number
+  threshold?: number
+}> = ({ segments, evaluationId, itemId, maxDisplay = 3, threshold = 0.3 }) => {
+  const [selectedIdx, setSelectedIdx] = useState(0)
+  const [imageLoaded, setImageLoaded] = useState(false)
+  const [imageError, setImageError] = useState(false)
+  
+  // Filter high-violence segments
+  const highViolenceSegments = segments
+    .filter(s => (s.violence_score || s.score || 0) > threshold)
+    .sort((a, b) => (b.violence_score || b.score || 0) - (a.violence_score || a.score || 0))
+    .slice(0, maxDisplay)
+  
+  if (highViolenceSegments.length === 0) return null
+  
+  const currentSegment = highViolenceSegments[selectedIdx] || highViolenceSegments[0]
+  const score = currentSegment.violence_score || currentSegment.score || 0
+  
+  // Use the start_time to find the frame
+  const frameTimestamp = currentSegment.start_time
+  const frameIndex = Math.floor(frameTimestamp)
+  const timestampMillis = Math.round(frameTimestamp * 1000)
+  const apiBase = import.meta.env.VITE_API_URL || 'http://localhost:8012'
+  const frameUrl = `${apiBase}/v1/evaluations/${evaluationId}/frames/frame_${String(frameIndex).padStart(4, '0')}_${timestampMillis}?item_id=${itemId}&stream=true`
+  
+  // Severity colors
+  const borderColor = score > 0.7 ? 'border-red-500' : score > 0.5 ? 'border-orange-500' : 'border-yellow-500'
+  const bgColor = score > 0.7 ? 'bg-red-500/5' : score > 0.5 ? 'bg-orange-500/5' : 'bg-yellow-500/5'
+  const badgeColor = score > 0.7 ? 'bg-red-500' : score > 0.5 ? 'bg-orange-500' : 'bg-yellow-500'
+  const glowColor = score > 0.7 ? 'shadow-red-500/20' : score > 0.5 ? 'shadow-orange-500/20' : 'shadow-yellow-500/20'
+  
+  return (
+    <div className="mt-3 space-y-2">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div className="text-[10px] text-red-400 uppercase tracking-wider flex items-center gap-1.5">
+          <AlertCircle size={10} />
+          Flagged Frame
+        </div>
+        <div className="text-[10px] text-gray-600">
+          {highViolenceSegments.length} segment{highViolenceSegments.length > 1 ? 's' : ''} flagged
+        </div>
+      </div>
+      
+      {/* Consistent frame container - fixed aspect ratio */}
+      <div className={`relative rounded-lg overflow-hidden border-2 ${borderColor} ${bgColor} shadow-lg ${glowColor}`}>
+        {/* Fixed 16:9 aspect ratio container */}
+        <div className="relative w-full" style={{ paddingBottom: '56.25%' }}>
+          {/* Loading state */}
+          {!imageLoaded && !imageError && (
+            <div className="absolute inset-0 flex items-center justify-center bg-gray-900/80">
+              <div className="flex flex-col items-center gap-2">
+                <Loader2 size={20} className="animate-spin text-gray-500" />
+                <span className="text-[10px] text-gray-600">Loading frame...</span>
+              </div>
+            </div>
+          )}
+          
+          {/* Error state */}
+          {imageError && (
+            <div className="absolute inset-0 flex items-center justify-center bg-gray-900">
+              <div className="flex flex-col items-center gap-2 text-gray-600">
+                <AlertCircle size={24} />
+                <span className="text-xs">Frame not available</span>
+                <span className="text-[10px]">at {frameTimestamp?.toFixed(1)}s</span>
+              </div>
+            </div>
+          )}
+          
+          {/* Frame image */}
+          <img 
+            src={frameUrl}
+            alt={`Violence at ${frameTimestamp}s`}
+            className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-300 ${imageLoaded ? 'opacity-100' : 'opacity-0'}`}
+            onLoad={() => setImageLoaded(true)}
+            onError={() => { setImageError(true); setImageLoaded(true) }}
+          />
+          
+          {/* Overlays - only show when image is loaded */}
+          {imageLoaded && !imageError && (
+            <>
+              {/* Top gradient for readability */}
+              <div className="absolute inset-x-0 top-0 h-12 bg-gradient-to-b from-black/60 to-transparent" />
+              
+              {/* Bottom gradient for readability */}
+              <div className="absolute inset-x-0 bottom-0 h-12 bg-gradient-to-t from-black/60 to-transparent" />
+              
+              {/* Score badge - top right */}
+              <div className={`absolute top-2 right-2 ${badgeColor} text-white text-xs px-2.5 py-1 rounded-full font-medium shadow-lg`}>
+                {(score * 100).toFixed(0)}% violence
+              </div>
+              
+              {/* Label badge - top left */}
+              {currentSegment.label && (
+                <div className="absolute top-2 left-2 bg-black/70 backdrop-blur-sm text-white text-[10px] px-2 py-1 rounded">
+                  {currentSegment.label}
+                </div>
+              )}
+              
+              {/* Time range - bottom left */}
+              <div className="absolute bottom-2 left-2 bg-black/70 backdrop-blur-sm text-white text-[10px] px-2 py-1 rounded font-mono">
+                {currentSegment.start_time?.toFixed(1)}s — {currentSegment.end_time?.toFixed(1)}s
+              </div>
+              
+              {/* Severity indicator - bottom right */}
+              <div className={`absolute bottom-2 right-2 ${badgeColor} w-2 h-2 rounded-full animate-pulse`} />
+            </>
+          )}
+        </div>
+      </div>
+      
+      {/* Segment selector - pill style */}
+      {highViolenceSegments.length > 1 && (
+        <div className="flex gap-1.5 flex-wrap">
+          {highViolenceSegments.map((seg, i) => {
+            const segScore = seg.violence_score || seg.score || 0
+            const isSelected = i === selectedIdx
+            const pillBorder = segScore > 0.7 ? 'border-red-600' : segScore > 0.5 ? 'border-orange-600' : 'border-yellow-600'
+            const pillBg = isSelected ? (segScore > 0.7 ? 'bg-red-900/50' : segScore > 0.5 ? 'bg-orange-900/50' : 'bg-yellow-900/50') : 'bg-gray-900'
+            
+            return (
+              <button
+                key={i}
+                onClick={() => { setSelectedIdx(i); setImageError(false); setImageLoaded(false) }}
+                className={`px-2.5 py-1 text-[10px] rounded-full flex items-center gap-1.5 transition-all border ${pillBg} ${
+                  isSelected ? `${pillBorder} text-white` : 'border-gray-800 text-gray-500 hover:text-white hover:border-gray-600'
+                }`}
+              >
+                <span className="font-mono">{seg.start_time?.toFixed(1)}s</span>
+                <span className={`font-medium ${segScore > 0.7 ? 'text-red-400' : segScore > 0.5 ? 'text-orange-400' : 'text-yellow-400'}`}>
+                  {(segScore * 100).toFixed(0)}%
+                </span>
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // PipelineStage interface imported from PipelineStages component
-// Default builtin stages - User-friendly names that showcase value
+// Default builtin stages - User-friendly names that showcase protection value
+// Names communicate what risk each stage protects against
 const DEFAULT_PIPELINE_STAGES: PipelineStage[] = [
-  { id: 'ingest_video', backendId: 'ingest', name: 'Upload', number: '01' },
-  { id: 'segment_video', backendId: 'segment', name: 'Extract', number: '02' },
-  { id: 'yolo26_vision', backendId: 'yolo26', name: 'Detect', number: '03' },
-  { id: 'yoloworld_vision', backendId: 'yoloworld', name: 'Scan', number: '04' },
-  { id: 'violence_detection', backendId: 'violence', name: 'Threats', number: '05' },
-  { id: 'audio_transcription', backendId: 'audio_asr', name: 'Speech', number: '06' },
-  { id: 'ocr_extraction', backendId: 'ocr', name: 'Text', number: '07' },
-  { id: 'text_moderation', backendId: 'text_moderation', name: 'Filter', number: '08' },
-  { id: 'policy_fusion', backendId: 'policy_fusion', name: 'Score', number: '09' },
-  { id: 'report_generation', backendId: 'report', name: 'Report', number: '10' },
+  { id: 'ingest_video', backendId: 'ingest', name: 'Ingest', number: '01' },           // Video ingestion & validation
+  { id: 'segment_video', backendId: 'segment', name: 'Frames', number: '02' },         // Frame extraction for analysis
+  { id: 'yolo26_vision', backendId: 'yolo26', name: 'Objects', number: '03' },         // Object detection (weapons, items)
+  { id: 'yoloworld_vision', backendId: 'yoloworld', name: 'Threats', number: '04' },   // Open-vocab threat scanning
+  { id: 'window_mining', backendId: 'window_mining', name: 'Hotspots', number: '05' }, // Suspicious segment detection
+  { id: 'violence_detection', backendId: 'xclip', name: 'Action', number: '06' },   // Action-based violence (X-CLIP)
+  { id: 'videomae_violence', backendId: 'videomae_violence', name: 'Violence', number: '07' }, // VideoMAE violence specialist
+  { id: 'pose_heuristics', backendId: 'pose_heuristics', name: 'Body', number: '08' }, // Body language & interaction
+  { id: 'nsfw_detection', backendId: 'nsfw_detection', name: 'Adult', number: '09' },  // Visual adult content detection
+  { id: 'audio_transcription', backendId: 'whisper', name: 'Speech', number: '10' }, // Speech-to-text analysis
+  { id: 'ocr_extraction', backendId: 'ocr', name: 'OCR', number: '11' },               // On-screen text extraction
+  { id: 'text_moderation', backendId: 'text_moderation', name: 'Language', number: '12' }, // Harmful language detection
+  { id: 'policy_fusion', backendId: 'policy_fusion', name: 'Fuse', number: '13' },     // Multi-signal fusion scoring
+  { id: 'report_generation', backendId: 'report', name: 'Verdict', number: '14' },     // Final safety verdict & report
 ]
 
 // Map backend stage types to UI stage ids
 const BACKEND_TO_UI_MAP: Record<string, string> = {
   'yolo26': 'yolo26_vision',
   'yoloworld': 'yoloworld_vision',
+  'xclip': 'violence_detection',
   'violence': 'violence_detection',
   'whisper': 'audio_transcription',
+  'audio_asr': 'audio_transcription',
   'ocr': 'ocr_extraction',
   'text_moderation': 'text_moderation',
+  'window_mining': 'window_mining',
+  'videomae_violence': 'videomae_violence',
+  'pose_heuristics': 'pose_heuristics',
+  'nsfw_detection': 'nsfw_detection',
+  'policy_fusion': 'policy_fusion',
+  'report': 'report_generation',
 }
 
 const DEFAULT_STAGE_PROGRESS_MAP: Record<string, number> = {
-  'ingest_video': 5, 'segment_video': 10, 'yolo26_vision': 25,
-  'yoloworld_vision': 30, 'violence_detection': 40, 'audio_transcription': 55,
-  'ocr_extraction': 65, 'text_moderation': 75, 'policy_fusion': 90,
-  'report_generation': 100
+  'ingest_video': 5, 'segment_video': 10, 'yolo26_vision': 18,
+  'yoloworld_vision': 24, 'window_mining': 30, 'violence_detection': 38,
+  'videomae_violence': 46, 'pose_heuristics': 52, 'nsfw_detection': 58,
+  'audio_transcription': 65, 'ocr_extraction': 72, 'text_moderation': 80, 
+  'policy_fusion': 92, 'report_generation': 100
 }
 
 // Compute progress for any stage (including external ones)
@@ -84,11 +377,32 @@ const Label = ({ children, variant }: { children: React.ReactNode, variant?: 'da
 )
 
 // Generate stage content matching original index.html data structure
-const generateStageContent = (stageName: string, data: any) => {
+// evaluationId and itemId are optional for backward compatibility but needed for detection viewer
+const generateStageContent = (stageName: string, data: any, evaluationId?: string, itemId?: string) => {
   if (!data) return <div className="text-gray-500 text-sm italic">No data available</div>
   
   const evidence = data.evidence || {}
   const metadata = data.metadata || {}
+  
+  // Handle skipped stages (e.g., video-only stages when processing images)
+  if (data.status === 'skipped') {
+    return (
+      <div className="flex flex-col items-center justify-center p-6 text-center bg-gray-900/50 rounded-lg border border-gray-700">
+        <div className="w-10 h-10 rounded-full bg-gray-800 flex items-center justify-center mb-3">
+          <svg className="w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
+          </svg>
+        </div>
+        <span className="text-gray-400 text-sm font-medium mb-1">Stage Skipped</span>
+        <span className="text-gray-500 text-xs">{data.skip_reason || 'Not applicable for this media type'}</span>
+        {data.media_type && (
+          <span className="text-[10px] text-gray-600 mt-2 px-2 py-0.5 bg-gray-800 rounded">
+            Media: {data.media_type}
+          </span>
+        )}
+      </div>
+    )
+  }
   
   // Handle cached stages (from reprocessing) - show full data with cached indicator
   // Industry standard: Display cached data transparently with clear visual indicator
@@ -257,6 +571,11 @@ const generateStageContent = (stageName: string, data: any) => {
       })
       const totalDetections = data.total_detections || yoloworldData.length
       
+      // Find flagged detections (weapons, dangerous items)
+      const flaggedDetections = yoloworldData.filter((d: any) => 
+        d.category === 'weapon' || d.category === 'dangerous' || d.category === 'substance'
+      )
+      
       return (
         <div className="space-y-2">
           <div className="text-sm text-gray-400">
@@ -272,26 +591,40 @@ const generateStageContent = (stageName: string, data: any) => {
               ))}
             </div>
           )}
+          
+          {/* Show flagged detections with bounding boxes */}
+          {evaluationId && itemId && flaggedDetections.length > 0 && (
+            <DetectionViewer
+              detections={flaggedDetections}
+              evaluationId={evaluationId}
+              itemId={itemId}
+              maxDisplay={3}
+            />
+          )}
         </div>
       )
     }
     
     case 'violence_detection': {
-      const violenceSegments = data.violence_segments || evidence.violence_segments || evidence.violence || []
-      const highViolence = violenceSegments.filter((s: any) => (s.violence_score || s.score || 0) > 0.5)
-      const maxScore = Math.max(...violenceSegments.map((s: any) => s.violence_score || s.score || 0), 0)
+      // Support multiple data formats for backward compatibility
+      const violenceSegments = data.violence_segments || data.high_violence_segments || evidence.violence_segments || evidence.violence || []
+      const segmentsAnalyzed = data.segments_analyzed || violenceSegments.length
+      const highViolence = data.high_violence_segments || violenceSegments.filter((s: any) => (s.violence_score || s.score || 0) > 0.5)
+      const maxScore = data.max_violence_score || Math.max(...violenceSegments.map((s: any) => s.violence_score || s.score || 0), 0)
+      
+      const highViolenceCount = data.high_violence_count || highViolence.length
       
       return (
         <div className="space-y-2">
           <div className="grid grid-cols-3 divide-x divide-gray-800 bg-gray-900/50 rounded">
-            <Metric label="Segments" value={violenceSegments.length} />
-            <Metric label="Flagged" value={highViolence.length} status={highViolence.length > 0 ? 'bad' : 'ok'} />
+            <Metric label="Segments" value={segmentsAnalyzed} />
+            <Metric label="Flagged" value={highViolenceCount} status={highViolenceCount > 0 ? 'bad' : 'ok'} />
             <Metric label="Peak" value={`${(maxScore * 100).toFixed(0)}%`} status={maxScore > 0.5 ? 'bad' : maxScore > 0.3 ? 'warn' : 'ok'} />
           </div>
-          {highViolence.length > 0 && (
+          {highViolenceCount > 0 && (
             <div className="space-y-1 pt-1">
-              <Label variant="danger">High Violence</Label>
-              {highViolence.slice(0, 3).map((seg: any, i: number) => (
+              <Label variant="danger">High Violence ({highViolenceCount} segments)</Label>
+              {(Array.isArray(highViolence) ? highViolence : []).slice(0, 3).map((seg: any, i: number) => (
                 <div key={i} className="flex justify-between text-xs py-1.5 px-2 bg-red-950/20 rounded">
                   <span className="text-gray-500 font-mono">{seg.start_time?.toFixed(1)}s — {seg.end_time?.toFixed(1)}s</span>
                   <span className="text-red-400">{((seg.violence_score || seg.score) * 100).toFixed(0)}%</span>
@@ -299,6 +632,190 @@ const generateStageContent = (stageName: string, data: any) => {
               ))}
             </div>
           )}
+          
+          {/* Show high-violence frames with red border */}
+          {evaluationId && itemId && violenceSegments.length > 0 && (
+            <ViolenceFrameViewer
+              segments={violenceSegments}
+              evaluationId={evaluationId}
+              itemId={itemId}
+              maxDisplay={3}
+              threshold={0.3}
+            />
+          )}
+        </div>
+      )
+    }
+    
+    // NEW: Window Mining Stage
+    case 'window_mining': {
+      const windows = data.windows || []
+      const windowsFound = data.windows_found || windows.length
+      const coveragePercent = data.coverage_percent || 0
+      const sensitivity = data.sensitivity || 'balanced'
+      
+      return (
+        <div className="space-y-2">
+          <div className="grid grid-cols-3 divide-x divide-gray-800 bg-gray-900/50 rounded">
+            <Metric label="Windows" value={windowsFound} />
+            <Metric label="Coverage" value={`${coveragePercent}%`} />
+            <Metric label="Sensitivity" value={sensitivity} />
+          </div>
+          {windows.length > 0 && (
+            <div className="space-y-1 pt-1">
+              <Label>Candidate Windows</Label>
+              {windows.slice(0, 4).map((win: any, i: number) => (
+                <div key={i} className="flex justify-between items-center text-xs py-1.5 px-2 bg-gray-900/50 rounded">
+                  <span className="text-gray-500 font-mono">{win.start_time?.toFixed(1)}s — {win.end_time?.toFixed(1)}s</span>
+                  <div className="flex items-center gap-2">
+                    {win.reasons?.length > 0 && (
+                      <span className="text-[10px] text-blue-400 bg-blue-950/30 px-1.5 py-0.5 rounded">
+                        {win.reasons[0]}
+                      </span>
+                    )}
+                    <span className="text-gray-400">{((win.score || 0) * 100).toFixed(0)}%</span>
+                  </div>
+                </div>
+              ))}
+              {windows.length > 4 && (
+                <div className="text-[10px] text-gray-600">+{windows.length - 4} more windows</div>
+              )}
+            </div>
+          )}
+        </div>
+      )
+    }
+    
+    // NEW: VideoMAE Violence Stage
+    case 'videomae_violence': {
+      const scores = data.scores || []
+      const windowsAnalyzed = data.windows_analyzed || scores.length
+      const maxViolence = data.max_violence_score || 0
+      const avgViolence = data.avg_violence_score || 0
+      const highViolenceWindows = data.high_violence_windows || 0
+      
+      return (
+        <div className="space-y-2">
+          <div className="grid grid-cols-3 divide-x divide-gray-800 bg-gray-900/50 rounded">
+            <Metric label="Windows" value={windowsAnalyzed} />
+            <Metric label="Max Score" value={`${(maxViolence * 100).toFixed(0)}%`} status={maxViolence > 0.5 ? 'bad' : maxViolence > 0.3 ? 'warn' : 'ok'} />
+            <Metric label="High Risk" value={highViolenceWindows} status={highViolenceWindows > 0 ? 'bad' : 'ok'} />
+          </div>
+          {scores.length > 0 && (
+            <div className="space-y-1 pt-1">
+              <Label variant={maxViolence > 0.5 ? 'danger' : undefined}>Action Analysis</Label>
+              {scores.slice(0, 4).map((score: any, i: number) => (
+                <div key={i} className="flex justify-between items-center text-xs py-1.5 px-2 bg-gray-900/50 rounded">
+                  <span className="text-gray-500 font-mono">{score.start_time?.toFixed(1)}s — {score.end_time?.toFixed(1)}s</span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-gray-400 truncate max-w-[100px]">{score.label}</span>
+                    <span className={`font-mono ${score.violence_score > 0.5 ? 'text-red-400' : score.violence_score > 0.3 ? 'text-yellow-400' : 'text-green-400'}`}>
+                      {((score.violence_score || 0) * 100).toFixed(0)}%
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          
+          {/* Show high-violence frames with red border */}
+          {evaluationId && itemId && scores.length > 0 && (
+            <ViolenceFrameViewer
+              segments={scores}
+              evaluationId={evaluationId}
+              itemId={itemId}
+              maxDisplay={3}
+              threshold={0.3}
+            />
+          )}
+        </div>
+      )
+    }
+    
+    // NEW: Pose Heuristics Stage
+    case 'pose_heuristics': {
+      const signals = data.signals || []
+      const signalsFound = data.signals_found || signals.length
+      const framesAnalyzed = data.frames_analyzed || 0
+      const signalTypes = data.signal_types || []
+      
+      return (
+        <div className="space-y-2">
+          <div className="grid grid-cols-3 divide-x divide-gray-800 bg-gray-900/50 rounded">
+            <Metric label="Signals" value={signalsFound} status={signalsFound > 3 ? 'bad' : signalsFound > 0 ? 'warn' : 'ok'} />
+            <Metric label="Frames" value={framesAnalyzed} />
+            <Metric label="Types" value={signalTypes.length} />
+          </div>
+          {signals.length > 0 && (
+            <div className="space-y-1 pt-1">
+              <Label variant={signalsFound > 3 ? 'danger' : 'warn'}>Violence Signals</Label>
+              {signals.slice(0, 4).map((sig: any, i: number) => (
+                <div key={i} className="flex justify-between items-center text-xs py-1.5 px-2 bg-gray-900/50 rounded">
+                  <div className="flex items-center gap-2">
+                    <span className="text-gray-500 font-mono">{sig.timestamp?.toFixed(1)}s</span>
+                    <span className="text-[10px] text-orange-400 bg-orange-950/30 px-1.5 py-0.5 rounded">
+                      {sig.signal_type?.replace(/_/g, ' ')}
+                    </span>
+                  </div>
+                  <span className="text-gray-400">{((sig.confidence || 0) * 100).toFixed(0)}%</span>
+                </div>
+              ))}
+              {signals.length > 4 && (
+                <div className="text-[10px] text-gray-600">+{signals.length - 4} more signals</div>
+              )}
+            </div>
+          )}
+          {signals.length === 0 && (
+            <div className="text-sm text-green-400/70 py-2">No violence signals detected</div>
+          )}
+        </div>
+      )
+    }
+    
+    case 'nsfw_detection': {
+      // NSFW Visual Detection - separates profanity from sexual content
+      const nsfwFrames = data.nsfw_frames || 0
+      const analyzedFrames = data.analyzed_frames || 0
+      const maxNsfw = data.max_nsfw_score || 0
+      const avgNsfw = data.avg_nsfw_score || 0
+      const isNsfw = data.is_nsfw || false
+      const detections = data.detections || []
+      
+      return (
+        <div className="space-y-2">
+          <div className="grid grid-cols-3 divide-x divide-gray-800 bg-gray-900/50 rounded">
+            <Metric label="Frames" value={analyzedFrames} />
+            <Metric label="NSFW" value={nsfwFrames} status={nsfwFrames > 0 ? 'bad' : 'ok'} />
+            <Metric label="Max" value={`${(maxNsfw * 100).toFixed(0)}%`} status={maxNsfw > 0.7 ? 'bad' : maxNsfw > 0.4 ? 'warn' : 'ok'} />
+          </div>
+          
+          {isNsfw && (
+            <div className="text-[10px] text-red-400 bg-red-950/30 px-2 py-1 rounded">
+              ⚠️ Visual NSFW content detected
+            </div>
+          )}
+          
+          {detections.length > 0 && (
+            <div className="space-y-1 pt-1">
+              <Label variant={isNsfw ? 'danger' : 'warn'}>Detections</Label>
+              {detections.slice(0, 4).map((det: any, i: number) => (
+                <div key={i} className="flex justify-between items-center text-xs py-1.5 px-2 bg-gray-900/50 rounded">
+                  <span className="text-gray-500 font-mono">{det.timestamp?.toFixed(1)}s</span>
+                  <span className={`font-mono ${det.nsfw_score > 0.7 ? 'text-red-400' : det.nsfw_score > 0.4 ? 'text-yellow-400' : 'text-green-400'}`}>
+                    {((det.nsfw_score || 0) * 100).toFixed(0)}%
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+          
+          {!isNsfw && nsfwFrames === 0 && (
+            <div className="text-sm text-green-400/70 py-2">✓ No visual NSFW content detected</div>
+          )}
+          
+          <div className="text-[10px] text-gray-600 mt-1">
+            Visual confirmation for sexual content scoring
+          </div>
         </div>
       )
     }
@@ -482,36 +999,197 @@ const generateStageContent = (stageName: string, data: any) => {
     }
     
     case 'report_generation': {
-      const summary = data.report_preview || data.report || data.summary
-      const reportType = data.report_type || 'generated'
+      const rawSummary = data.report_preview || data.report || data.summary || ''
+      const reportType = data.provider || data.report_type || 'openai'
+      const tokensUsed = data.tokens_used
+      
+      // Parse verdict info from various formats (table rows, key-value, etc.)
+      const verdictMatch = rawSummary.match(/(?:Your Final Verdict|Final Verdict)[:\s|]*\**\s*(SAFE|UNSAFE|FAIL|PASS|REVIEW)/i)
+      const verdict = verdictMatch ? verdictMatch[1].toUpperCase() : null
+      const confidenceMatch = rawSummary.match(/Confidence[:\s|]*\**\s*(\d+)%?/i)
+      const confidence = confidenceMatch ? parseInt(confidenceMatch[1]) : null
+      const concernMatch = rawSummary.match(/Primary Concern[:\s|]*\**\s*([^|\n]+)/i)
+      const primaryConcern = concernMatch ? concernMatch[1].replace(/\|/g, '').trim() : null
+      const agreesMatch = rawSummary.match(/Agrees with Automated[?:\s|]*\**\s*(Yes|No)/i)
+      const agreesWithAutomated = agreesMatch ? agreesMatch[1] : null
+      
+      // Extract executive summary - find text after Executive Summary heading
+      const execMatch = rawSummary.match(/Executive Summary[^\n]*\n+([^#*|][^\n]+(?:\n[^#*|][^\n]+)*)/i)
+      const executiveSummary = execMatch ? execMatch[1].trim() : null
+      
+      // Clean up markdown - remove raw table syntax that didn't render
+      const cleanedSummary = rawSummary
+        .replace(/\|[-:]+\|[-:|\s]+\|/g, '') // Remove table separator rows
+        .replace(/^\|.*\|$/gm, (match) => {
+          // Convert simple table rows to readable format
+          if (match.includes('---')) return ''
+          return ''  // Hide raw table rows - we extract data above
+        })
+        .replace(/\n{3,}/g, '\n\n') // Clean up extra newlines
+      
+      // Verdict styling
+      const isUnsafe = verdict === 'UNSAFE' || verdict === 'FAIL'
+      const verdictColor = isUnsafe ? 'text-red-400' : verdict === 'REVIEW' ? 'text-yellow-400' : 'text-green-400'
+      const verdictBg = isUnsafe ? 'bg-gradient-to-br from-red-500/20 to-red-900/10 border-red-500/40' : verdict === 'REVIEW' ? 'bg-gradient-to-br from-yellow-500/20 to-yellow-900/10 border-yellow-500/40' : 'bg-gradient-to-br from-green-500/20 to-green-900/10 border-green-500/40'
+      const verdictGlow = isUnsafe ? 'shadow-red-500/20' : verdict === 'REVIEW' ? 'shadow-yellow-500/20' : 'shadow-green-500/20'
       
       return (
-        <div className="space-y-2">
-          <div className="text-[10px] text-gray-600">
-            Generated via <span className="text-gray-400">{reportType}</span>
-          </div>
-          {summary ? (
-            <div className="prose prose-sm prose-invert max-w-none max-h-48 overflow-y-auto">
-              <ReactMarkdown
-                components={{
-                  h1: ({children}) => <h1 className="text-base font-semibold text-white mb-2">{children}</h1>,
-                  h2: ({children}) => <h2 className="text-sm font-medium text-white mb-1.5">{children}</h2>,
-                  h3: ({children}) => <h3 className="text-sm font-medium text-gray-300 mb-1">{children}</h3>,
-                  p: ({children}) => <p className="text-xs text-gray-400 mb-2 leading-relaxed">{children}</p>,
-                  ul: ({children}) => <ul className="text-xs text-gray-400 list-disc list-inside mb-2 space-y-0.5">{children}</ul>,
-                  ol: ({children}) => <ol className="text-xs text-gray-400 list-decimal list-inside mb-2 space-y-0.5">{children}</ol>,
-                  li: ({children}) => <li className="text-gray-400">{children}</li>,
-                  strong: ({children}) => <strong className="text-white font-medium">{children}</strong>,
-                  em: ({children}) => <em className="text-gray-300 italic">{children}</em>,
-                  code: ({children}) => <code className="text-[10px] bg-gray-800 px-1 py-0.5 rounded text-gray-300">{children}</code>,
-                  blockquote: ({children}) => <blockquote className="border-l-2 border-gray-700 pl-2 text-gray-500 italic text-xs">{children}</blockquote>,
-                }}
-              >
-                {summary}
-              </ReactMarkdown>
+        <div className="space-y-4 overflow-y-auto" style={{ maxHeight: 'calc(100vh - 350px)' }}>
+          {/* Report source badge */}
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <div className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse"></div>
+              <span className="text-[10px] text-gray-500 uppercase tracking-wider">Generated via</span>
+              <span className="text-[10px] text-cyan-400 font-medium">{reportType}</span>
             </div>
-          ) : (
-            <div className="text-gray-600 text-sm">Report ready</div>
+            {tokensUsed && (
+              <span className="text-[10px] text-gray-600 font-mono">{tokensUsed} tokens</span>
+            )}
+          </div>
+          
+          {/* Verdict Card - Hero section */}
+          {verdict && (
+            <div className={`rounded-xl border p-5 ${verdictBg} shadow-lg ${verdictGlow}`}>
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-3">
+                  <div className={`w-12 h-12 rounded-full flex items-center justify-center ${isUnsafe ? 'bg-red-500/20' : verdict === 'REVIEW' ? 'bg-yellow-500/20' : 'bg-green-500/20'}`}>
+                    <span className="text-2xl">{isUnsafe ? '🛡️' : verdict === 'REVIEW' ? '⚠️' : '✓'}</span>
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-0.5">Final Verdict</div>
+                    <div className={`text-2xl font-bold ${verdictColor}`}>{verdict}</div>
+                  </div>
+                </div>
+                {confidence && (
+                  <div className="text-right bg-black/20 rounded-lg px-4 py-2">
+                    <div className="text-[10px] text-gray-500 uppercase tracking-wider">Confidence</div>
+                    <div className="text-2xl font-bold text-white font-mono">{confidence}<span className="text-base text-gray-400">%</span></div>
+                  </div>
+                )}
+              </div>
+              
+              {/* Verdict details grid */}
+              <div className="grid grid-cols-2 gap-3 pt-3 border-t border-white/10">
+                {primaryConcern && (
+                  <div className="col-span-2">
+                    <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Primary Concern</div>
+                    <div className={`text-sm font-medium ${isUnsafe ? 'text-red-300' : 'text-gray-300'}`}>{primaryConcern}</div>
+                  </div>
+                )}
+                {agreesWithAutomated && (
+                  <div>
+                    <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Agrees with Automated</div>
+                    <div className={`text-sm font-medium ${agreesWithAutomated === 'Yes' ? 'text-green-400' : 'text-yellow-400'}`}>
+                      {agreesWithAutomated === 'Yes' ? '✓ Yes' : '✗ No'}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+          
+          {/* Executive Summary Card */}
+          {executiveSummary && (
+            <div className="rounded-xl bg-gray-900/60 border border-gray-700/50 p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <div className="w-6 h-6 rounded bg-cyan-500/20 flex items-center justify-center">
+                  <span className="text-sm">📋</span>
+                </div>
+                <span className="text-sm font-semibold text-white">Executive Summary</span>
+              </div>
+              <p className="text-sm text-gray-300 leading-relaxed">{executiveSummary}</p>
+            </div>
+          )}
+          
+          {/* Full Report Content - only show if there's content beyond what we extracted */}
+          {cleanedSummary && cleanedSummary.trim().length > 50 && (
+            <details className="group">
+              <summary className="cursor-pointer text-[11px] text-gray-500 hover:text-gray-400 flex items-center gap-2 py-2">
+                <span className="group-open:rotate-90 transition-transform">▶</span>
+                View Full Report
+              </summary>
+              <div className="rounded-lg bg-gray-900/30 border border-gray-800/50 p-4 mt-2">
+                <div className="prose prose-sm prose-invert max-w-none">
+                  <ReactMarkdown
+                    components={{
+                      h1: ({children}) => (
+                        <h1 className="text-base font-semibold text-white mb-3 mt-4 first:mt-0 flex items-center gap-2">
+                          <span className="text-cyan-400">◆</span> {children}
+                        </h1>
+                      ),
+                      h2: ({children}) => (
+                        <h2 className="text-sm font-medium text-white mb-2 mt-4 pb-2 border-b border-gray-800 flex items-center gap-2">
+                          <span className="w-1 h-4 bg-cyan-500 rounded-full"></span> {children}
+                        </h2>
+                      ),
+                      h3: ({children}) => <h3 className="text-sm font-medium text-gray-200 mb-2 mt-3">{children}</h3>,
+                      p: ({children}) => {
+                        // Skip paragraphs that are just pipe characters (failed table rows)
+                        const text = String(children || '')
+                        if (text.match(/^\s*\|.*\|\s*$/) || text.match(/^[-|:\s]+$/)) return null
+                        return <p className="text-sm text-gray-400 mb-3 leading-relaxed">{children}</p>
+                      },
+                      ul: ({children}) => <ul className="text-sm text-gray-400 space-y-1.5 mb-3 ml-1">{children}</ul>,
+                      ol: ({children}) => <ol className="text-sm text-gray-400 list-decimal list-outside ml-4 mb-3 space-y-1">{children}</ol>,
+                      li: ({children}) => (
+                        <li className="text-gray-400 leading-relaxed flex items-start gap-2">
+                          <span className="text-cyan-500 mt-1.5">•</span>
+                          <span>{children}</span>
+                        </li>
+                      ),
+                      strong: ({children}) => {
+                        const text = String(children)
+                        if (text.match(/UNSAFE|FAIL|HIGH|CRITICAL/i)) {
+                          return <strong className="text-red-400 font-semibold">{children}</strong>
+                        }
+                        if (text.match(/SAFE|PASS|LOW/i)) {
+                          return <strong className="text-green-400 font-semibold">{children}</strong>
+                        }
+                        return <strong className="text-white font-semibold">{children}</strong>
+                      },
+                      em: ({children}) => <em className="text-gray-300 italic">{children}</em>,
+                      code: ({children}) => (
+                        <code className="text-xs bg-gray-800 px-1.5 py-0.5 rounded text-cyan-300 font-mono">{children}</code>
+                      ),
+                      blockquote: ({children}) => (
+                        <blockquote className="border-l-2 border-cyan-500 pl-3 my-3 bg-cyan-500/5 py-2 rounded-r text-gray-400 italic">
+                          {children}
+                        </blockquote>
+                      ),
+                    hr: () => <hr className="border-gray-800 my-4" />,
+                    table: ({children}) => (
+                      <div className="overflow-x-auto my-3 rounded-lg border border-gray-800">
+                        <table className="w-full text-sm">{children}</table>
+                      </div>
+                    ),
+                    thead: ({children}) => <thead className="bg-gray-800/50">{children}</thead>,
+                    tbody: ({children}) => <tbody className="divide-y divide-gray-800/50">{children}</tbody>,
+                    tr: ({children}) => <tr className="hover:bg-gray-800/30 transition-colors">{children}</tr>,
+                    th: ({children}) => (
+                      <th className="px-3 py-2 text-left text-gray-300 font-medium text-xs uppercase tracking-wider">{children}</th>
+                    ),
+                    td: ({children}) => {
+                      const text = String(children || '')
+                      let cellClass = "px-3 py-2 text-gray-400 text-xs"
+                      if (text.match(/UNSAFE|FAIL|HIGH/i)) cellClass += " text-red-400 font-medium"
+                      else if (text.match(/SAFE|PASS|LOW/i)) cellClass += " text-green-400 font-medium"
+                      else if (text.match(/\d+%/)) cellClass += " text-white font-mono"
+                      return <td className={cellClass}>{children}</td>
+                    },
+                  }}
+                >
+                  {cleanedSummary}
+                </ReactMarkdown>
+                </div>
+              </div>
+            </details>
+          )}
+          
+          {!rawSummary && (
+            <div className="text-gray-600 text-sm py-8 text-center border border-dashed border-gray-800 rounded-lg">
+              <span className="text-2xl mb-2 block">📊</span>
+              Report ready
+            </div>
           )}
         </div>
       )
@@ -683,6 +1361,7 @@ const Pipeline: FC = () => {
   const [stageOutput, setStageOutput] = useState<any>(null)
   const [stageLoading, setStageLoading] = useState(false)
   const [completedStages, setCompletedStages] = useState<string[]>([])
+  const [showChat, setShowChat] = useState(false)
   const [videoError, setVideoError] = useState(false)
   const [labeledVideoError, setLabeledVideoError] = useState(false)
   const [presets, setPresets] = useState<CriteriaPreset[]>([])
@@ -770,6 +1449,19 @@ const Pipeline: FC = () => {
       } else {
         localStorage.setItem(STAGE_CACHE_KEY, JSON.stringify(cache))
       }
+    } catch {
+      // Ignore localStorage errors
+    }
+  }
+
+  // Clear all cached stage outputs for a specific item (used when reprocessing)
+  const clearCachedStageOutputs = (itemId: string) => {
+    try {
+      const cache = JSON.parse(localStorage.getItem(STAGE_CACHE_KEY) || '{}')
+      const keysToRemove = Object.keys(cache).filter(key => key.startsWith(`${itemId}:`))
+      keysToRemove.forEach(key => delete cache[key])
+      localStorage.setItem(STAGE_CACHE_KEY, JSON.stringify(cache))
+      console.log(`Cleared ${keysToRemove.length} cached stage outputs for item: ${itemId}`)
     } catch {
       // Ignore localStorage errors
     }
@@ -951,8 +1643,13 @@ const Pipeline: FC = () => {
 
   const handleFileSelect = async (files: FileList | null) => {
     if (!files || files.length === 0) return
-    const fileArray = Array.from(files).filter(f => f.type.startsWith('video/') || f.name.match(/\.(mp4|avi|mov|mkv|webm)$/i))
-    if (fileArray.length === 0) { toast.error('Please select valid video files'); return }
+    // Accept both video and image files
+    const fileArray = Array.from(files).filter(f => 
+      f.type.startsWith('video/') || 
+      f.type.startsWith('image/') ||
+      f.name.match(/\.(mp4|avi|mov|mkv|webm|jpg|jpeg|png|webp|gif|bmp)$/i)
+    )
+    if (fileArray.length === 0) { toast.error('Please select valid video or image files'); return }
 
     const ids = addVideos(fileArray.map(file => ({
       filename: file.name, file, status: 'queued' as VideoStatus, source: 'local', progress: 0,
@@ -999,7 +1696,7 @@ const Pipeline: FC = () => {
 
   const processAllVideos = async () => {
     const videosToProcess = queue.filter(v => v.status !== 'completed' && v.status !== 'processing' && v.file)
-    if (videosToProcess.length === 0) { toast.error('No videos to process'); return }
+    if (videosToProcess.length === 0) { toast.error('No items to process'); return }
     setProcessingBatch(true)
 
     try {
@@ -1097,18 +1794,18 @@ const Pipeline: FC = () => {
         status: 'processing' as VideoStatus, 
         progress: 0,
         result: undefined,
+        verdict: undefined,
       })
       
-      // Clear cached stage outputs
-      try {
-        const cache = JSON.parse(localStorage.getItem(STAGE_CACHE_KEY) || '{}')
-        Object.keys(cache).forEach(key => {
-          if (key.startsWith(videoId)) delete cache[key]
-        })
-        localStorage.setItem(STAGE_CACHE_KEY, JSON.stringify(cache))
-      } catch { /* ignore */ }
+      // Clear cached stage outputs for BOTH itemId and evaluationId
+      // The cache key can be either depending on context
+      if (video.itemId) {
+        clearCachedStageOutputs(video.itemId)
+      }
+      clearCachedStageOutputs(video.evaluationId)
+      clearCachedStageOutputs(videoId) // Also clear by local video ID
       
-      // Clear selected stage output
+      // Clear selected stage output and reset UI state
       setSelectedStage(null)
       setStageOutput(null)
       setCompletedStages([])
@@ -1134,7 +1831,7 @@ const Pipeline: FC = () => {
 
   // Clear all videos from queue and backend
   const handleClearAll = async () => {
-    if (!confirm('Delete all videos from queue and saved results?')) return
+    if (!confirm('Delete all items from queue and saved results?')) return
     
     // Get all evaluation IDs before clearing
     const evaluationIds = new Set(queue.filter(v => v.evaluationId).map(v => v.evaluationId!))
@@ -1151,7 +1848,7 @@ const Pipeline: FC = () => {
       }
     }
     
-    toast.success('All videos cleared')
+    toast.success('All items cleared')
   }
   
   // Memoize video URLs to prevent flickering on re-renders
@@ -1188,32 +1885,67 @@ const Pipeline: FC = () => {
   }, [videoUrls.original])
 
   // Fetch stage output from backend with localStorage caching
-  const fetchStageOutput = async (evaluationId: string, stageName: string, itemId?: string) => {
+  // skipCache: force fresh fetch (used during/after reprocessing)
+  const fetchStageOutput = async (evaluationId: string, stageName: string, itemId?: string, skipCache: boolean = false) => {
     setStageLoading(true)
     
     // Use itemId for caching if available, otherwise evaluationId
     const cacheKey = itemId || evaluationId
     
-    // Check localStorage cache first
-    const cached = getCachedStageOutput(cacheKey, stageName)
-    if (cached) {
-      console.log('Using cached stage output for:', stageName)
-      setStageOutput(cached)
-      setStageLoading(false)
-      return
+    // Skip cache if video is currently processing OR if explicitly requested
+    const isProcessing = selectedVideo?.status === 'processing'
+    const shouldSkipCache = skipCache || isProcessing
+    
+    // Check localStorage cache first (unless skipping)
+    if (!shouldSkipCache) {
+      const cached = getCachedStageOutput(cacheKey, stageName)
+      if (cached) {
+        console.log('Using cached stage output for:', stageName)
+        setStageOutput(cached)
+        setStageLoading(false)
+        return
+      }
+    } else {
+      console.log('Skipping cache for stage:', stageName, { skipCache, isProcessing })
     }
     
     try {
       // Use new evaluation API with evaluationId and itemId
       const output = await stageApi.getStageOutput(evaluationId, stageName, itemId)
       if (output && Object.keys(output).length > 0) {
-        // Cache the result
-        setCachedStageOutput(cacheKey, stageName, output)
+        // Check if this is a skipped stage output
+        const itemOutput = output.outputs?.[itemId || ''] || output
+        if (itemOutput?.status === 'skipped') {
+          // Show skipped stage info
+          setStageOutput({
+            status: 'skipped',
+            skip_reason: itemOutput.skip_reason || 'Stage skipped',
+            media_type: itemOutput.media_type || 'unknown',
+          })
+          setStageLoading(false)
+          return
+        }
+        
+        // Cache the result (only if not currently processing)
+        if (!isProcessing) {
+          setCachedStageOutput(cacheKey, stageName, output)
+        }
         setStageOutput(output)
         setStageLoading(false)
         return
       }
-    } catch (error) {
+    } catch (error: any) {
+      // Handle 404 for skipped/missing stages gracefully
+      if (error?.response?.status === 404) {
+        // Stage doesn't exist - likely skipped for this media type
+        setStageOutput({
+          status: 'skipped',
+          skip_reason: 'Stage not available for this media type',
+        })
+        setStageLoading(false)
+        return
+      }
+      // Re-throw other errors
       console.log('Stage output fetch failed, using fallback:', stageName)
     }
     
@@ -1221,8 +1953,10 @@ const Pipeline: FC = () => {
     if (selectedVideo?.result) {
       console.log('Deriving stage output from result for:', stageName)
       const derivedOutput = deriveStageOutputFromResult(stageName, selectedVideo.result)
-      // Cache the derived output too
-      setCachedStageOutput(cacheKey, stageName, derivedOutput)
+      // Cache the derived output too (only if not processing)
+      if (!isProcessing) {
+        setCachedStageOutput(cacheKey, stageName, derivedOutput)
+      }
       setStageOutput(derivedOutput)
     } else {
       console.log('No result data available for fallback')
@@ -1292,6 +2026,33 @@ const Pipeline: FC = () => {
         return {
           stage: 'violence',
           violence_segments: violenceData
+        }
+      case 'window_mining':
+        return {
+          stage: 'window_mining',
+          windows: toArray(evidence.candidate_windows || result.candidate_windows),
+          windows_found: toArray(evidence.candidate_windows || result.candidate_windows).length
+        }
+      case 'videomae_violence':
+        return {
+          stage: 'videomae_violence',
+          scores: toArray(evidence.videomae_scores || result.videomae_scores),
+          windows_analyzed: toArray(evidence.videomae_scores || result.videomae_scores).length
+        }
+      case 'pose_heuristics':
+        return {
+          stage: 'pose_heuristics',
+          signals: toArray(evidence.pose_signals || result.pose_signals),
+          signals_found: toArray(evidence.pose_signals || result.pose_signals).length
+        }
+      case 'nsfw_detection':
+        const nsfwResults = evidence.nsfw_results || result.nsfw_results || {}
+        return {
+          stage: 'nsfw_detection',
+          is_nsfw: nsfwResults.is_nsfw || false,
+          max_nsfw_score: nsfwResults.max_nsfw_score || 0,
+          nsfw_frames: nsfwResults.nsfw_frames || 0,
+          analyzed_frames: nsfwResults.analyzed_frames || 0
         }
       case 'audio_asr':
         return {
@@ -1400,7 +2161,7 @@ const Pipeline: FC = () => {
       {/* Header */}
       <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between flex-shrink-0">
         <div className="flex items-center gap-4">
-          <span className="text-xs text-gray-500 tracking-widest">VIDEO EVALUATOR</span>
+          <span className="text-xs text-gray-500 tracking-widest">VISION EVALUATOR</span>
           {/* Criteria Selector */}
           <div className="relative">
             <button 
@@ -1481,7 +2242,7 @@ const Pipeline: FC = () => {
         <div className="w-56 border-r border-gray-800 flex flex-col flex-shrink-0">
           <div className="flex-1 overflow-y-auto">
             {queue.length === 0 ? (
-              <div className="p-4 text-center text-gray-700"><Upload size={20} className="mx-auto mb-1" /><p className="text-[10px]">Add videos</p></div>
+              <div className="p-4 text-center text-gray-700"><Upload size={20} className="mx-auto mb-1" /><p className="text-[10px]">Add media</p></div>
             ) : (
               <div className="p-1">
                 {queue.map(video => (
@@ -1559,14 +2320,31 @@ const Pipeline: FC = () => {
                       ) : (
                         (() => {
                           // Use memoized video URLs to prevent flickering
-                          const videoSrc = videoType === 'original' ? videoUrls.original : videoUrls.labeled
+                          const mediaSrc = videoType === 'original' ? videoUrls.original : videoUrls.labeled
                           
-                          if (!videoSrc) {
+                          if (!mediaSrc) {
                             return (
                               <div className="text-center text-gray-600 p-4">
                                 <Video size={24} className="mx-auto mb-2 opacity-50" />
-                                <p className="text-xs">Video not available</p>
+                                <p className="text-xs">Media not available</p>
                               </div>
+                            )
+                          }
+                          
+                          // Detect if it's an image based on filename extension
+                          const isImage = selectedVideo.filename?.match(/\.(jpg|jpeg|png|webp|gif|bmp)$/i)
+                          
+                          if (isImage) {
+                            return (
+                              <img 
+                                src={mediaSrc}
+                                alt={selectedVideo.filename || 'Uploaded image'}
+                                className="max-w-full max-h-full object-contain"
+                                key={`image-${selectedVideo.itemId || selectedVideo.id}-${videoType}`}
+                                onError={() => {
+                                  setVideoError(true)
+                                }}
+                              />
                             )
                           }
                           
@@ -1575,7 +2353,7 @@ const Pipeline: FC = () => {
                               controls 
                               className="max-w-full max-h-full" 
                               key={`video-${selectedVideo.itemId || selectedVideo.id}-${videoType}`}
-                              src={videoSrc}
+                              src={mediaSrc}
                               onError={() => {
                                 if (videoType === 'labeled') {
                                   console.log('Labeled video failed to load')
@@ -1592,10 +2370,14 @@ const Pipeline: FC = () => {
                       <div className="text-center">
                         <Loader2 size={24} className="mx-auto mb-1 animate-spin text-gray-700" />
                         <p className="text-[10px] text-gray-600">
-                          {selectedVideo.currentStage === 'ingest_video' ? 'Uploading video...' : `${selectedVideo.progress}%`}
+                          {selectedVideo.currentStage === 'ingest_video' ? 'Uploading media...' : `${selectedVideo.progress}%`}
                         </p>
                       </div>
-                    ) : <Video size={24} className="text-gray-800" />}
+                    ) : selectedVideo.filename?.match(/\.(jpg|jpeg|png|webp|gif|bmp)$/i) ? (
+                      <ImageIcon size={24} className="text-gray-800" />
+                    ) : (
+                      <Video size={24} className="text-gray-800" />
+                    )}
                   </div>
                   
                   {/* Processed Frames Gallery - Show as soon as segmentation completes */}
@@ -1618,21 +2400,50 @@ const Pipeline: FC = () => {
                   )}
                 </div>
 
-                {/* Stage Output */}
+                {/* Stage Output / Chat */}
                 <div className="flex flex-col bg-gray-900 border border-gray-800 overflow-hidden">
                   <div className="p-1.5 border-b border-gray-800 flex items-center justify-between">
-                    <span className="text-[9px] text-gray-500 uppercase">{selectedStage ? PIPELINE_STAGES.find(s => s.id === selectedStage)?.name : 'Results'}</span>
-                    {selectedStage && <button onClick={() => { setSelectedStage(null); setStageOutput(null) }} className="text-[9px] text-gray-600 hover:text-white">← Back</button>}
+                    <div className="flex items-center gap-2">
+                      <span className="text-[9px] text-gray-500 uppercase tracking-wider">
+                        {showChat ? 'ASK JUDEX' : selectedStage ? PIPELINE_STAGES.find(s => s.id === selectedStage)?.name : 'RESULTS'}
+                      </span>
+                      {/* Chat toggle button - show when evaluation is complete */}
+                      {selectedVideo?.status === 'completed' && selectedVideo?.evaluationId && (
+                        <button
+                          onClick={() => setShowChat(!showChat)}
+                          className={`flex items-center gap-1 px-2 py-0.5 text-[9px] transition-all ${
+                            showChat 
+                              ? 'bg-white text-black' 
+                              : 'bg-transparent border border-gray-700 text-gray-400 hover:text-white hover:border-white'
+                          }`}
+                        >
+                          <Diamond size={9} />
+                          {showChat ? 'Results' : 'Ask Judex'}
+                        </button>
+                      )}
+                    </div>
+                    {selectedStage && !showChat && (
+                      <button onClick={() => { setSelectedStage(null); setStageOutput(null) }} className="text-[9px] text-gray-600 hover:text-white">← Back</button>
+                    )}
                   </div>
-                  <div className="flex-1 overflow-y-auto p-2">
-                    {selectedStage && stageLoading ? (
-                      <div className="text-center py-6">
+                  <div className="flex-1 overflow-hidden">
+                    {/* Chat View */}
+                    {showChat && selectedVideo?.evaluationId ? (
+                      <ReportChat 
+                        evaluationId={selectedVideo.evaluationId}
+                        onClose={() => setShowChat(false)}
+                      />
+                    ) : selectedStage && stageLoading ? (
+                      <div className="text-center py-6 p-2">
                         <Loader2 size={20} className="mx-auto mb-1 animate-spin text-blue-400" />
                         <p className="text-[10px] text-gray-600">Loading stage output...</p>
                       </div>
                     ) : selectedStage && stageOutput ? (
-                      generateStageContent(selectedStage, stageOutput)
+                      <div className="overflow-y-auto p-2 h-full">
+                        {generateStageContent(selectedStage, stageOutput, selectedVideo?.evaluationId, selectedVideo?.itemId)}
+                      </div>
                     ) : selectedVideo.status === 'completed' && selectedVideo.result ? (
+                      <div className="overflow-y-auto p-2 h-full">
                       <div className="space-y-2">
                         {/* Verdict */}
                         <div className={`p-3 border text-center ${
@@ -1702,15 +2513,16 @@ const Pipeline: FC = () => {
                         
                         <p className="text-[9px] text-gray-600 text-center">Click any completed stage above to see its output</p>
                       </div>
+                    </div>
                     ) : selectedVideo.status === 'processing' ? (
-                      <div className="text-center py-6"><Loader2 size={20} className="mx-auto mb-1 animate-spin text-gray-700" /><p className="text-[10px] text-gray-600">{selectedVideo.currentStage?.replace(/_/g, ' ')} - {selectedVideo.progress}%</p></div>
-                    ) : <div className="text-center py-6 text-gray-700"><Circle size={20} className="mx-auto mb-1" /><p className="text-[10px]">Click play</p></div>}
+                      <div className="text-center py-6 p-2"><Loader2 size={20} className="mx-auto mb-1 animate-spin text-gray-700" /><p className="text-[10px] text-gray-600">{selectedVideo.currentStage?.replace(/_/g, ' ')} - {selectedVideo.progress}%</p></div>
+                    ) : <div className="text-center py-6 text-gray-700 p-2"><Circle size={20} className="mx-auto mb-1" /><p className="text-[10px]">Click play</p></div>}
                   </div>
                 </div>
               </div>
             </>
           ) : (
-            <div className="flex-1 flex items-center justify-center border border-dashed border-gray-800 m-2"><div className="text-center text-gray-700"><Upload size={24} className="mx-auto mb-1" /><p className="text-[10px]">Select or add videos</p></div></div>
+            <div className="flex-1 flex items-center justify-center border border-dashed border-gray-800 m-2"><div className="text-center text-gray-700"><Upload size={24} className="mx-auto mb-1" /><p className="text-[10px]">Select or add media</p></div></div>
           )}
         </div>
       </div>
@@ -1728,7 +2540,7 @@ const Pipeline: FC = () => {
                   </button>
                 ))}
               </div>
-              {uploadSource === 'local' && (<div><input ref={fileInputRef} type="file" multiple accept="video/*" className="hidden" onChange={(e) => handleFileSelect(e.target.files)} /><button onClick={() => fileInputRef.current?.click()} className="w-full p-4 border border-dashed border-gray-600 hover:border-white transition-all text-center"><Upload size={20} className="mx-auto mb-1 opacity-50" /><p className="text-[10px]">Click or drag</p></button></div>)}
+              {uploadSource === 'local' && (<div><input ref={fileInputRef} type="file" multiple accept="video/*,image/*" className="hidden" onChange={(e) => handleFileSelect(e.target.files)} /><button onClick={() => fileInputRef.current?.click()} className="w-full p-4 border border-dashed border-gray-600 hover:border-white transition-all text-center"><Upload size={20} className="mx-auto mb-1 opacity-50" /><p className="text-[10px]">Click or drag (video/image)</p></button></div>)}
               {uploadSource === 'url' && (<div><textarea value={urlInput} onChange={(e) => setUrlInput(e.target.value)} placeholder="URLs (one per line)" className="w-full h-20 bg-black border border-gray-700 p-2 text-[10px] resize-none focus:border-white outline-none" /><button onClick={handleUrlImport} className="btn w-full mt-2 text-[10px]">IMPORT</button></div>)}
               {(uploadSource === 'storage' || uploadSource === 'database') && (<div className="text-center py-4 text-gray-600"><Cloud size={20} className="mx-auto mb-1 opacity-50" /><p className="text-[10px]">Coming soon</p></div>)}
             </div>

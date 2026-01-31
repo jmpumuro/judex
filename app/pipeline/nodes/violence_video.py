@@ -88,6 +88,19 @@ def run_violence_model(state: PipelineState) -> PipelineState:
         segments_analyzed=len(violence_segments),
         max_violence_score=round(max_score, 3),
         high_violence_count=len(high_violence_segments),
+        # Full violence segments list (for frontend compatibility)
+        violence_segments=[
+            {
+                "start_time": s["start_time"],
+                "end_time": s["end_time"],
+                "violence_score": round(s["violence_score"], 3),
+                "score": round(s["violence_score"], 3),  # Alias for compatibility
+                "label": s.get("label"),
+                "id": s.get("id"),
+                "segment_index": s.get("segment_index")
+            }
+            for s in violence_segments
+        ],
         # Include high-scoring segments for preview
         high_violence_segments=[
             {

@@ -3,9 +3,12 @@ import {
   Settings as SettingsIcon, Check, AlertCircle, ChevronDown, ChevronRight,
   Shield, Eye, FileText, Zap, Info, RefreshCw, Upload, Download, Copy,
   Trash2, Plus, Save, Edit3, Code, Sliders, ExternalLink, Play, X,
-  CheckCircle, XCircle, Terminal, Power, Lock
+  CheckCircle, XCircle, Terminal, Power, Lock, Gauge, History
 } from 'lucide-react'
 import { api, stagesApi, ExternalStageConfig, StageInfo, ValidationResult, ToggleStageResponse } from '@/api/endpoints'
+import { PolicySettings } from '@/components/settings/PolicySettings'
+import { StageSettings } from '@/components/settings/StageSettings'
+import { ConfigVersionHistory } from '@/components/settings/ConfigVersionHistory'
 import toast from 'react-hot-toast'
 
 interface Preset {
@@ -96,7 +99,7 @@ stages:
 `
 
 // Settings page tabs
-type SettingsTab = 'criteria' | 'stages' | 'stage-config'
+type SettingsTab = 'criteria' | 'policy' | 'stages' | 'stage-config'
 
 const Settings: FC = () => {
   const [activeTab, setActiveTab] = useState<SettingsTab>('criteria')
@@ -533,6 +536,17 @@ options:
                 Criteria
               </button>
               <button
+                onClick={() => setActiveTab('policy')}
+                className={`px-4 py-1.5 text-xs transition-colors ${
+                  activeTab === 'policy' 
+                    ? 'bg-white text-black' 
+                    : 'hover:bg-gray-900'
+                }`}
+              >
+                <Gauge size={12} className="inline mr-1.5" />
+                Policy
+              </button>
+              <button
                 onClick={() => setActiveTab('stages')}
                 className={`px-4 py-1.5 text-xs transition-colors ${
                   activeTab === 'stages' 
@@ -910,13 +924,124 @@ options:
                         ))}
                       </div>
                       <p className="text-[10px] text-gray-600 mt-2">
-                        Based on your criteria, these detectors will automatically analyze videos.
+                        Based on your criteria, these detectors will automatically analyze your media.
                       </p>
                     </div>
                   </>
                 )}
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* POLICY SETTINGS TAB */}
+      {activeTab === 'policy' && (
+        <div className="flex-1 flex overflow-hidden">
+          {/* Sidebar - Criteria Selection */}
+          <div className="w-56 border-r border-gray-800 flex-shrink-0 overflow-y-auto">
+            <div className="p-3">
+              <h3 className="text-[9px] text-gray-500 uppercase tracking-wider mb-2 px-1">SELECT CRITERIA</h3>
+              <div className="space-y-0.5">
+                {presets.map(preset => (
+                  <button
+                    key={preset.id}
+                    onClick={() => { setSelectedId(preset.id); setSelectedType('preset') }}
+                    className={`w-full p-2.5 text-left transition-all rounded ${
+                      selectedId === preset.id && selectedType === 'preset'
+                        ? 'bg-gray-800 border-l-2 border-white' 
+                        : 'hover:bg-gray-900/50 border-l-2 border-transparent'
+                    }`}
+                  >
+                    <div className="font-medium text-sm">{preset.name}</div>
+                    <div className="text-[10px] text-gray-500">{preset.criteria_count} criteria</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+            
+            {customCriteria.length > 0 && (
+              <div className="p-3 border-t border-gray-800">
+                <h3 className="text-[9px] text-gray-500 uppercase tracking-wider mb-2 px-1">CUSTOM</h3>
+                <div className="space-y-0.5">
+                  {customCriteria.map(preset => (
+                    <button
+                      key={preset.id}
+                      onClick={() => { setSelectedId(preset.id); setSelectedType('custom') }}
+                      className={`w-full p-2.5 text-left transition-all rounded ${
+                        selectedId === preset.id && selectedType === 'custom'
+                          ? 'bg-gray-800 border-l-2 border-blue-500' 
+                          : 'hover:bg-gray-900/50 border-l-2 border-transparent'
+                      }`}
+                    >
+                      <div className="font-medium text-sm">{preset.name}</div>
+                      <div className="text-[10px] text-gray-500">{preset.criteria_count} criteria</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+          
+          {/* Main Content - Policy Settings */}
+          <div className="flex-1 flex flex-col overflow-hidden">
+            {/* Header */}
+            <div className="p-4 border-b border-gray-800 flex-shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-blue-900/20 rounded-lg">
+                  <Gauge size={20} className="text-blue-400" />
+                </div>
+                <div>
+                  <h2 className="text-lg font-medium">Policy Settings</h2>
+                  <p className="text-xs text-gray-500">Configure fusion strategy and stage knobs for <span className="text-white">{presets.find(p => p.id === selectedId)?.name || customCriteria.find(p => p.id === selectedId)?.name}</span></p>
+                </div>
+              </div>
+            </div>
+            
+            {/* Scrollable Content */}
+            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+              {/* Two-Column Layout */}
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                {/* Level 1: Fusion/Policy Settings */}
+                <div className="bg-gray-900/30 border border-gray-800 rounded-lg p-4">
+                  <div className="flex items-center gap-2 mb-4">
+                    <Sliders size={14} className="text-blue-400" />
+                    <h3 className="text-sm font-medium">Verdict & Scoring</h3>
+                    <span className="text-[9px] px-1.5 py-0.5 bg-blue-900/30 text-blue-400 rounded">Level 1</span>
+                  </div>
+                  <PolicySettings 
+                    criteriaId={selectedId} 
+                    onSave={() => toast.success('Policy settings saved')}
+                  />
+                </div>
+                
+                {/* Level 2: Stage/Model Knobs */}
+                <div className="bg-gray-900/30 border border-gray-800 rounded-lg p-4">
+                  <div className="flex items-center gap-2 mb-4">
+                    <Zap size={14} className="text-purple-400" />
+                    <h3 className="text-sm font-medium">Stage Knobs</h3>
+                    <span className="text-[9px] px-1.5 py-0.5 bg-purple-900/30 text-purple-400 rounded">Level 2</span>
+                  </div>
+                  <StageSettings 
+                    criteriaId={selectedId}
+                    activeStages={allStages.filter(s => s.enabled).map(s => s.type)}
+                    onSave={() => toast.success('Stage settings saved')}
+                  />
+                </div>
+              </div>
+              
+              {/* Version History - Full Width */}
+              <div className="bg-gray-900/30 border border-gray-800 rounded-lg p-4">
+                <div className="flex items-center gap-2 mb-4">
+                  <History size={14} className="text-gray-400" />
+                  <h3 className="text-sm font-medium">Version History</h3>
+                </div>
+                <ConfigVersionHistory 
+                  criteriaId={selectedId}
+                  onRollback={() => loadPreset(selectedId, selectedType)}
+                />
+              </div>
+            </div>
           </div>
         </div>
       )}

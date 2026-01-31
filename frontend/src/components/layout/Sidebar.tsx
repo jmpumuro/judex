@@ -43,7 +43,7 @@ const Sidebar: FC = () => {
         <div className="sidebar-brand-icon group-hover:hidden text-center">v1</div>
         <div className="hidden group-hover:block">
           <p>Judex v2.0.0</p>
-          <p className="mt-1">Video Evaluation</p>
+          <p className="mt-1">Vision Evaluation</p>
         </div>
       </div>
     </aside>

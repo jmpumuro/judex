@@ -21,6 +21,8 @@ from app.api.evaluations import router as evaluation_router
 from app.api.live import router as live_router
 from app.api.criteria_routes import router as criteria_router
 from app.api.stages_routes import router as stages_router
+from app.api.config_routes import router as config_router
+from app.api.chat_routes import router as chat_router
 from app.core.config import settings
 from app.core.logging import get_logger
 
@@ -94,6 +96,49 @@ def preload_models():
     thread.start()
 
 
+async def recover_interrupted_pipelines():
+    """
+    Recover any pipelines interrupted by container restart.
+    
+    Industry standard: On startup, detect stuck evaluations and resume them
+    using existing reprocess infrastructure (no redundancy).
+    
+    Runs in background to not block server startup.
+    """
+    import asyncio
+    
+    async def recovery_task():
+        # Wait for services to fully initialize
+        await asyncio.sleep(15)
+        
+        try:
+            from app.pipeline.recovery import recover_all_stuck_evaluations
+            
+            logger.info("Checking for stuck evaluations to recover...")
+            result = await recover_all_stuck_evaluations(
+                stuck_threshold_minutes=10,  # Industry standard: catch stuck faster
+                max_concurrent=2,
+            )
+            
+            total = result.get("total", 0)
+            recovered = result.get("recovered", 0)
+            failed = result.get("failed", 0)
+            
+            if total == 0:
+                logger.info("✓ No stuck evaluations found")
+            elif failed == 0:
+                logger.info(f"✓ Recovered {recovered}/{total} stuck evaluations")
+            else:
+                logger.warning(f"Recovery: {recovered} succeeded, {failed} failed out of {total}")
+                
+        except Exception as e:
+            logger.error(f"Pipeline recovery check failed: {e}")
+            logger.info("Use GET /v1/evaluations/stuck to check manually")
+    
+    # Run in background
+    asyncio.create_task(recovery_task())
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown."""
@@ -115,6 +160,9 @@ async def lifespan(app: FastAPI):
     # Pre-load models in background to warm up
     preload_models()
     
+    # Recover any interrupted pipelines (industry standard: resume from crash)
+    await recover_interrupted_pipelines()
+    
     yield
     
     # Shutdown
@@ -125,7 +173,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.app_name,
     version=settings.version,
-    description="Video evaluation framework with configurable criteria",
+    description="Vision evaluation framework with configurable criteria",
     lifespan=lifespan
 )
 
@@ -143,6 +191,8 @@ app.add_middleware(
 app.include_router(evaluation_router)  # /v1/evaluate, /v1/evaluations/*
 app.include_router(criteria_router)    # /v1/criteria/*
 app.include_router(stages_router)      # /v1/stages/*
+app.include_router(config_router)      # /v1/config/* - Schema, validation, versioning
+app.include_router(chat_router)        # /v1/evaluations/{id}/chat/* - ReportChat agent
 app.include_router(live_router, prefix=settings.api_prefix)  # /v1/live/*
 
 # ===== Utility Routes =====

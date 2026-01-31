@@ -17,6 +17,9 @@ accelerate==1.2.1
 # Video processing
 opencv-python-headless==4.10.0.84
 
+# Pose estimation
+mediapipe==0.10.18
+
 # Audio processing
 librosa==0.10.2.post1
 soundfile==0.12.1

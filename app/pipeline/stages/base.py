@@ -4,11 +4,24 @@ Base interface for pipeline stage plugins.
 StagePlugin provides a standard interface that all pipeline stages must implement.
 This allows both builtin stages (wrapping existing nodes) and future external
 stages to be executed uniformly by the PipelineRunner.
+
+Supports both VIDEO and IMAGE media types with per-stage compatibility.
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 from enum import Enum
+
+
+class MediaType(str, Enum):
+    """Supported media types for pipeline processing."""
+    VIDEO = "video"
+    IMAGE = "image"
+
+
+# Default: All stages support both media types unless overridden
+ALL_MEDIA_TYPES = {MediaType.VIDEO, MediaType.IMAGE}
+VIDEO_ONLY = {MediaType.VIDEO}
 
 
 class StageStatus(str, Enum):
@@ -35,12 +48,20 @@ class StageImpact(str, Enum):
 
 # Default impact levels for builtin stages
 STAGE_IMPACT_DEFAULTS: Dict[str, StageImpact] = {
+    # Core stages
     "yolo26": StageImpact.SUPPORTING,
     "yoloworld": StageImpact.ADVISORY,
-    "violence": StageImpact.SUPPORTING,  # xclip
+    "xclip": StageImpact.SUPPORTING,  # violence/xclip
+    "violence": StageImpact.SUPPORTING,  # alias for xclip
     "whisper": StageImpact.SUPPORTING,
     "ocr": StageImpact.ADVISORY,
     "text_moderation": StageImpact.SUPPORTING,
+    # Enhanced violence detection stack
+    "window_mining": StageImpact.ADVISORY,  # Preprocessing
+    "pose_heuristics": StageImpact.SUPPORTING,
+    "videomae_violence": StageImpact.SUPPORTING,
+    # NSFW visual detection (sexual content confirmation)
+    "nsfw_detection": StageImpact.SUPPORTING,
 }
 
 
@@ -132,6 +153,26 @@ class StagePlugin(ABC):
         Default is False for builtin stages. External plugins override to True.
         """
         return False
+    
+    @property
+    def supported_media_types(self) -> Set[MediaType]:
+        """
+        Media types this stage supports (video, image, or both).
+        
+        Stages that require temporal context (multiple frames) should return VIDEO_ONLY.
+        Default is ALL_MEDIA_TYPES (both video and image).
+        
+        Override in subclasses for video-only stages like violence detection.
+        """
+        return ALL_MEDIA_TYPES
+    
+    def supports_media_type(self, media_type: str) -> bool:
+        """Check if this stage supports a given media type."""
+        try:
+            mt = MediaType(media_type)
+            return mt in self.supported_media_types
+        except ValueError:
+            return False
     
     @property
     def input_keys(self) -> Set[str]:

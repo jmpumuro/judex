@@ -152,15 +152,28 @@ class StageRegistry:
             WhisperStagePlugin,
             OcrStagePlugin,
             TextModerationStagePlugin,
+            # Enhanced violence detection stack
+            WindowMiningStagePlugin,
+            PoseHeuristicsStagePlugin,
+            VideoMAEViolenceStagePlugin,
+            # NSFW visual detection (reduces sexual false positives)
+            NSFWDetectionStagePlugin,
         )
         
         builtin_stages = [
+            # Core stages
             Yolo26StagePlugin,
             YoloWorldStagePlugin,
             ViolenceStagePlugin,
             WhisperStagePlugin,
             OcrStagePlugin,
             TextModerationStagePlugin,
+            # Enhanced violence detection stack
+            WindowMiningStagePlugin,
+            PoseHeuristicsStagePlugin,
+            VideoMAEViolenceStagePlugin,
+            # NSFW visual detection (sexual content confirmation)
+            NSFWDetectionStagePlugin,
         ]
         
         for plugin_class in builtin_stages:

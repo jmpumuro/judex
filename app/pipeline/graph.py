@@ -287,28 +287,39 @@ async def run_pipeline(
     video_id: str = None,
     progress_callback=None,
     resume_from_checkpoint: bool = False,
+    existing_state: dict = None,
+    media_type: str = None,  # "video" or "image" - auto-detected if None
 ) -> dict:
     """
     Run the complete pipeline with optional checkpointing.
     
-    This is the main entry point for video evaluation.
+    This is the main entry point for media evaluation (video or image).
     
     Industry Standard:
     - Callbacks passed via config["callbacks"]
     - Criteria passed via config["configurable"]["evaluation_criteria"]
     - State contains ONLY serializable data
+    - Media type determines which stages run (images skip temporal stages)
     
     Args:
-        video_path: Path to video file
+        video_path: Path to media file (video or image)
         criteria: EvaluationCriteria object (or None for default)
-        video_id: Optional video ID for progress tracking and checkpointing
+        video_id: Optional media ID for progress tracking and checkpointing
         progress_callback: Optional async callback for progress updates
-        resume_from_checkpoint: If True and video_id has a checkpoint, resume from it
+        resume_from_checkpoint: If True, skip ingest/segment if existing_state provided
+        existing_state: Pre-existing state from previous run (for reprocessing)
+        media_type: Media type ("video" or "image"), auto-detected if None
         
     Returns:
         Evaluation result dictionary
     """
-    logger.info(f"Starting pipeline for video: {video_path} (resume={resume_from_checkpoint})")
+    # Auto-detect media type if not provided
+    if media_type is None:
+        from app.utils.media import detect_media_type
+        detected = detect_media_type(video_path)
+        media_type = detected.value
+    
+    logger.info(f"Starting pipeline for {media_type}: {video_path} (resume={resume_from_checkpoint}, has_existing_state={existing_state is not None})")
     
     # Default criteria
     if criteria is None:
@@ -337,6 +348,8 @@ async def run_pipeline(
     # Initialize state - ONLY serializable data (industry standard)
     initial_state = PipelineState(
         video_path=video_path,
+        media_path=video_path,  # Unified media path
+        media_type=media_type,  # "video" or "image"
         policy_config={},
         video_id=video_id,
     )
@@ -360,8 +373,22 @@ async def run_pipeline(
             # Merge thread_id into config (for checkpointing)
             config["configurable"]["thread_id"] = video_id
             
-            if resume_from_checkpoint:
-                # Resume from checkpoint - load existing state and merge
+            # If existing_state is provided (reprocessing), merge it into initial_state
+            if existing_state and resume_from_checkpoint:
+                logger.info(f"Merging existing state for reprocessing (keys: {list(existing_state.keys())})")
+                
+                # Merge existing state values into initial state
+                for key, value in existing_state.items():
+                    if value is not None:
+                        initial_state[key] = value
+                
+                # Mark that we're reprocessing so ingest/segment can be skipped
+                initial_state["is_reprocessing"] = True
+                
+                logger.info(f"Merged existing state: duration={existing_state.get('duration')}, fps={existing_state.get('fps')}, has_audio={existing_state.get('has_audio')}")
+            
+            elif resume_from_checkpoint:
+                # Legacy checkpoint-based resume
                 logger.info(f"Resuming from checkpoint for {video_id}")
                 
                 # Get existing checkpoint state
@@ -374,6 +401,7 @@ async def run_pipeline(
                         if key not in initial_state or initial_state[key] is None:
                             initial_state[key] = value
                     
+                    initial_state["is_reprocessing"] = True
                     logger.info(f"Loaded checkpoint with keys: {list(checkpoint_state.keys())[:10]}...")
                 else:
                     logger.warning(f"No checkpoint found for {video_id}, running full pipeline")

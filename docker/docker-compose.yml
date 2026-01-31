@@ -7,6 +7,8 @@ services:
     container_name: judex
     ports:
       - "8012:8000"
+    env_file:
+      - ../.env
     environment:
       # Model configuration
       - YOLO26_MODEL_ID=openvision/yolo26-s
@@ -15,13 +17,9 @@ services:
       - PROFANITY_MODEL_ID=tarekziade/pardonmyai
       - NLI_MODEL_ID=facebook/bart-large-mnli
       
-      # LLM for reports (template mode - Qwen disabled due to memory)
-      - LLM_PROVIDER=template
+      # LLM for reports - configured via .env file
+      # OPENAI_API_KEY and LLM_PROVIDER are loaded from ../.env
       - QWEN_MODEL_ID=Qwen/Qwen2.5-0.5B-Instruct
-      
-      # OpenAI (optional fallback for LLM reports)
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - OPENAI_MODEL=gpt-4o-mini
       
       # Database (PostgreSQL)
       - DATABASE_URL=postgresql://docker:docker@host.docker.internal:5432/judex

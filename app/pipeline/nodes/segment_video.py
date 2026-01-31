@@ -54,29 +54,44 @@ def _load_cached_stage_output(video_id: str, stage_name: str) -> dict:
 
 def segment_video_impl(state: PipelineState, config: Optional[RunnableConfig] = None) -> PipelineState:
     """
-    Segment video into time windows and sample frames for VideoMAE.
+    Segment media into time windows and sample frames.
+    
+    Supports both VIDEO and IMAGE:
+    - VIDEO: Create overlapping segments for VideoMAE (16 frames per window)
+    - IMAGE: Single frame, no segmentation needed
     
     Industry Standard: Receives config parameter for callbacks.
     Progress is sent via config["callbacks"], not stored in state.
-    
-    VideoMAE architecture:
-    - Expects exactly 16 frames per inference
-    - At 30fps (normalized), 16 frames = 0.53s (too short for violence context)
-    - Solution: Sample to effective 8fps → 16 frames ≈ 2 seconds
-    - Use overlapping segments (50% stride) to catch events at boundaries
     """
-    logger.info("=== Segment Video Node ===")
+    logger.info("=== Segment Media Node ===")
+    
+    video_id = state.get("video_id")
+    is_reprocessing = state.get("is_reprocessing", False)
+    media_type = state.get("media_type", "video")
+    
+    # Handle IMAGE - no segmentation needed
+    if media_type == "image":
+        return _segment_image(state, config)
+    
+    # === VIDEO PROCESSING ===
     
     # Check if already processed (resuming from checkpoint)
+    # For reprocessing, always re-extract frames since work_dir is new
     sampled_frames = state.get("sampled_frames", [])
     segments = state.get("segments", [])
     
+    # Check if frames actually exist on disk
+    frames_exist_on_disk = False
     if sampled_frames and len(sampled_frames) > 0:
+        if isinstance(sampled_frames[0], dict) and "path" in sampled_frames[0]:
+            first_frame_path = sampled_frames[0].get("path", "")
+            frames_exist_on_disk = first_frame_path and Path(first_frame_path).exists()
+    
+    if not is_reprocessing and sampled_frames and len(sampled_frames) > 0 and frames_exist_on_disk:
         if isinstance(sampled_frames[0], dict) and "path" in sampled_frames[0]:
             logger.info(f"Segment already complete (from checkpoint), {len(sampled_frames)} frames cached, skipping")
             send_progress(config, "segment_video", "Using cached result", 100)
             
-            video_id = state.get("video_id")
             if video_id:
                 cached_output = _load_cached_stage_output(video_id, "segment")
                 
@@ -104,6 +119,9 @@ def segment_video_impl(state: PipelineState, config: Optional[RunnableConfig] = 
                     original_processing_time=cached_output.get("processing_time"),
                 ))
             return state
+    
+    if is_reprocessing:
+        logger.info("Reprocessing mode: re-extracting frames")
     
     send_progress(config, "segment_video", "Preparing video segments", 20)
     
@@ -242,6 +260,121 @@ def segment_video_impl(state: PipelineState, config: Optional[RunnableConfig] = 
         sampling_fps=yolo_sampling_fps,
         videomae_config=state.get("videomae_config"),
         segment_overlap_percent=round((videomae_segment_duration - videomae_stride) / videomae_segment_duration * 100, 1)
+    ))
+    
+    return state
+
+
+def _segment_image(state: PipelineState, config: Optional[RunnableConfig]) -> PipelineState:
+    """
+    Handle image "segmentation" - just prepare the single frame.
+    
+    For images, we already have the frame from ingest, so this stage
+    mainly uploads it to storage and prepares thumbnail.
+    
+    Args:
+        state: Pipeline state with image metadata
+        config: LangGraph config for callbacks
+        
+    Returns:
+        Updated state with sampled_frames containing the single image
+    """
+    from PIL import Image
+    import io
+    
+    video_id = state.get("video_id")
+    work_dir = state.get("work_dir")
+    
+    send_progress(config, "segment_video", "Preparing image for analysis", 30)
+    
+    # The image is already in sampled_frames from ingest
+    sampled_frames = state.get("sampled_frames", [])
+    
+    if not sampled_frames:
+        # Fallback: use video_path as the frame
+        media_path = state.get("media_path") or state.get("video_path")
+        sampled_frames = [{
+            "path": media_path,
+            "timestamp": 0,
+            "frame_index": 0,
+            "tier": 1,
+        }]
+        state["sampled_frames"] = sampled_frames
+    
+    # Ensure frame path exists
+    frame_path = sampled_frames[0].get("path") if sampled_frames else None
+    if not frame_path or not Path(frame_path).exists():
+        logger.error(f"Image frame not found: {frame_path}")
+        state["errors"] = state.get("errors", []) + ["Image frame not found"]
+        return state
+    
+    send_progress(config, "segment_video", "Uploading image to storage", 50)
+    
+    # Upload frame to storage
+    storage = get_storage_service()
+    frames_uploaded = 0
+    
+    try:
+        # Upload the single frame
+        frame_name = f"frame_0000_0{Path(frame_path).suffix}"
+        storage.upload_frame(video_id, frame_name, frame_path)
+        frames_uploaded = 1
+        logger.info(f"Uploaded image frame to storage")
+    except Exception as e:
+        logger.warning(f"Failed to upload image to storage: {e}")
+    
+    send_progress(config, "segment_video", "Creating thumbnail", 70)
+    
+    # Create and upload thumbnail
+    try:
+        with Image.open(frame_path) as img:
+            # Create thumbnail
+            thumb = img.copy()
+            thumb.thumbnail((THUMB_WIDTH, THUMB_HEIGHT), Image.Resampling.LANCZOS)
+            
+            # Save thumbnail
+            thumb_dir = Path(work_dir) / "thumbnails"
+            thumb_dir.mkdir(exist_ok=True)
+            thumb_path = thumb_dir / "thumb_0000.jpg"
+            
+            # Convert to RGB if necessary (for PNG with alpha)
+            if thumb.mode in ('RGBA', 'P'):
+                thumb = thumb.convert('RGB')
+            thumb.save(thumb_path, "JPEG", quality=85)
+            
+            # Upload thumbnail
+            storage.upload_thumbnail(video_id, "thumb_0000.jpg", str(thumb_path))
+            logger.info(f"Uploaded image thumbnail to storage")
+            
+    except Exception as e:
+        logger.warning(f"Failed to create/upload thumbnail: {e}")
+    
+    # No segments for images (no temporal data)
+    state["segments"] = []
+    
+    # No VideoMAE config for images
+    state["videomae_config"] = {
+        "segment_duration": 0,
+        "stride": 0,
+        "frames_per_segment": 1,
+        "total_segments": 0,
+        "media_type": "image"
+    }
+    
+    send_progress(config, "segment_video", "Image ready", 100)
+    
+    logger.info(f"Image segmentation complete: 1 frame prepared")
+    
+    # Save stage output
+    save_stage_output(video_id, "segment", format_stage_output(
+        "segment",
+        media_type="image",
+        frames_extracted=1,
+        frames_stored=frames_uploaded,
+        thumbnails_stored=1,
+        segments_created=0,
+        sampling_fps=0,
+        note="Single image - no temporal segmentation"
     ))
     
     return state

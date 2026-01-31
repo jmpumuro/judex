@@ -23,6 +23,7 @@ export interface PipelineStage {
   isExternal?: boolean
   displayColor?: string
   enabled?: boolean
+  hasOverrides?: boolean  // Indicates stage has custom config overrides
 }
 
 interface PipelineStagesProps {
@@ -118,8 +119,15 @@ const StageNode = memo<StageNodeProps>(({
       <button 
         onClick={onClick} 
         disabled={!clickable} 
-        className="flex flex-col items-center group"
+        className="flex flex-col items-center group relative"
       >
+        {/* Config overrides indicator badge */}
+        {stage.hasOverrides && (
+          <div 
+            className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 bg-yellow-500 rounded-full border border-gray-950"
+            title="Stage has custom settings"
+          />
+        )}
         {/* Use CSS transition for smooth visual updates */}
         <div 
           className={`w-9 h-9 rounded-full border-2 flex items-center justify-center text-xs transition-all duration-200 ${nodeStyles} ${clickable ? 'cursor-pointer hover:opacity-80' : 'cursor-default'}`}
@@ -139,6 +147,7 @@ const StageNode = memo<StageNodeProps>(({
   return (
     prevProps.stage.id === nextProps.stage.id &&
     prevProps.stage.enabled === nextProps.stage.enabled &&
+    prevProps.stage.hasOverrides === nextProps.stage.hasOverrides &&
     prevProps.status === nextProps.status &&
     prevProps.isSelected === nextProps.isSelected &&
     prevProps.isLast === nextProps.isLast &&
