@@ -34,28 +34,72 @@ os.makedirs(settings.temp_dir, exist_ok=True)
 
 
 def init_database():
-    """Initialize database tables and seed data."""
+    """Initialize database tables and seed data.
+    
+    Non-blocking: logs error and continues if database unavailable.
+    Set SKIP_DB_INIT=true to skip entirely.
+    """
+    import os
+    if os.getenv("SKIP_DB_INIT", "false").lower() == "true":
+        logger.info("SKIP_DB_INIT=true - skipping database initialization")
+        return
+        
     try:
-        from app.db.connection import init_db, get_db_session
-        from app.db.seeds import run_all_seeds
+        import signal
         
-        logger.info("Initializing database...")
-        init_db()
-        logger.info("✓ Database tables created")
+        # Timeout handler to prevent hanging on unreachable database
+        def timeout_handler(signum, frame):
+            raise TimeoutError("Database connection timed out")
         
-        # Seed built-in data (presets, etc.)
-        logger.info("Seeding database...")
-        with get_db_session() as session:
-            run_all_seeds(session)
-        logger.info("✓ Database seeded")
+        # Set 10 second timeout (only works on Unix)
+        old_handler = None
+        try:
+            old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(10)
+        except (ValueError, AttributeError):
+            pass  # SIGALRM not available on Windows
         
+        try:
+            from app.db.connection import init_db, get_db_session
+            from app.db.seeds import run_all_seeds
+            
+            logger.info("Initializing database...")
+            init_db()
+            logger.info("✓ Database tables created")
+            
+            # Seed built-in data (presets, etc.)
+            logger.info("Seeding database...")
+            with get_db_session() as session:
+                run_all_seeds(session)
+            logger.info("✓ Database seeded")
+        finally:
+            # Reset alarm
+            try:
+                signal.alarm(0)
+                if old_handler:
+                    signal.signal(signal.SIGALRM, old_handler)
+            except (ValueError, AttributeError):
+                pass
+        
+    except TimeoutError:
+        logger.error("Database connection timed out after 10s")
+        logger.warning("Database features may not work - set DATABASE_URL correctly")
     except Exception as e:
         logger.error(f"Database initialization failed: {e}")
         logger.warning("Database features may not work correctly")
 
 
 def init_storage():
-    """Initialize MinIO object storage."""
+    """Initialize MinIO object storage.
+    
+    Non-blocking: logs error and continues if MinIO unavailable.
+    Set SKIP_STORAGE_INIT=true to skip entirely.
+    """
+    import os
+    if os.getenv("SKIP_STORAGE_INIT", "false").lower() == "true":
+        logger.info("SKIP_STORAGE_INIT=true - skipping storage initialization")
+        return
+        
     try:
         from app.utils.storage import get_storage_service
         logger.info(f"Initializing MinIO storage ({settings.minio_endpoint})...")
@@ -68,7 +112,16 @@ def init_storage():
 
 
 def init_external_stages():
-    """Load external stage configurations from database."""
+    """Load external stage configurations from database.
+    
+    Non-blocking: logs warning and continues if unavailable.
+    Skipped if database initialization was skipped.
+    """
+    import os
+    if os.getenv("SKIP_DB_INIT", "false").lower() == "true":
+        logger.info("Skipping external stages (database not initialized)")
+        return
+        
     try:
         from app.external_stages.registry import load_external_stages_from_db
         logger.info("Loading external stage configurations...")
@@ -119,8 +172,14 @@ async def recover_interrupted_pipelines():
     using existing reprocess infrastructure (no redundancy).
     
     Runs in background to not block server startup.
+    Skipped if database initialization was skipped.
     """
     import asyncio
+    import os
+    
+    if os.getenv("SKIP_DB_INIT", "false").lower() == "true":
+        logger.info("Skipping pipeline recovery (database not initialized)")
+        return
     
     async def recovery_task():
         # Wait for services to fully initialize

@@ -23,7 +23,9 @@ ENV PYTHONUNBUFFERED=1 \
     TRANSFORMERS_CACHE=/models/hf/transformers \
     TEMP_DIR=/tmp/judex \
     PORT=8080 \
-    PRELOAD_MODELS=false
+    PRELOAD_MODELS=false \
+    SKIP_DB_INIT=true \
+    SKIP_STORAGE_INIT=true
 
 # Create directories
 RUN mkdir -p /models/hf /models/hf/transformers /tmp/judex
