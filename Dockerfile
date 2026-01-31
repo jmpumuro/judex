@@ -15,11 +15,15 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Set environment variables
+# PYTHONPATH must include /app for imports to work
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app \
     HF_HOME=/models/hf \
     TRANSFORMERS_CACHE=/models/hf/transformers \
-    TEMP_DIR=/tmp/judex
+    TEMP_DIR=/tmp/judex \
+    PORT=8080 \
+    PRELOAD_MODELS=false
 
 # Create directories
 RUN mkdir -p /models/hf /models/hf/transformers /tmp/judex
@@ -38,15 +42,12 @@ COPY scripts/ ./scripts/
 # This downloads ~1.5GB of models but ensures fast first request
 RUN python scripts/prefetch_models.py || echo "Model prefetch completed with warnings"
 
-# Expose port
-EXPOSE 8000
+# Expose port (Cloud Run uses PORT env var, default 8080)
+EXPOSE 8080
 
-# Health check
-# Health check with longer timeout for video processing
-# The server may be busy processing and slow to respond
-# Healthcheck using Python (curl not installed)
+# Health check - use PORT env var
 HEALTHCHECK --interval=60s --timeout=30s --start-period=180s --retries=5 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/v1/health', timeout=10)" || exit 1
+    CMD python -c "import os; import urllib.request; urllib.request.urlopen(f'http://localhost:{os.environ.get(\"PORT\", 8080)}/v1/health', timeout=10)" || exit 1
 
-# Run the application
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run the application - use shell form to expand PORT env var
+CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}

@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     model_service_url: str = os.getenv("MODEL_SERVICE_URL", "")
     use_model_service: bool = os.getenv("USE_MODEL_SERVICE", "false").lower() == "true"
     
+    # Model Loading Settings
+    # Set PRELOAD_MODELS=false to lazy-load models on first request (faster startup)
+    preload_models: bool = os.getenv("PRELOAD_MODELS", "true").lower() == "true"
+    
     # Database Settings
     database_url: str = os.getenv("DATABASE_URL", "postgresql://docker:docker@localhost:5432/judex")
     

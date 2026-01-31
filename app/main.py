@@ -80,7 +80,22 @@ def init_external_stages():
 
 
 def preload_models():
-    """Pre-load all models at startup using the model registry (singletons)."""
+    """Pre-load all models at startup using the model registry (singletons).
+    
+    Skipped when:
+    - USE_MODEL_SERVICE=true (models handled by separate service)
+    - PRELOAD_MODELS=false (lazy load for faster startup)
+    """
+    # Skip if using external model service (separated architecture)
+    if settings.use_model_service:
+        logger.info("Using external model service - skipping local model preload")
+        return
+    
+    # Skip if preloading disabled (for faster Cloud Run startup)
+    if not settings.preload_models:
+        logger.info("PRELOAD_MODELS=false - models will lazy-load on first request")
+        return
+    
     import threading
     
     def load_in_background():

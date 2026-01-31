@@ -17,10 +17,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app \
     HF_HOME=/models/hf \
     TRANSFORMERS_CACHE=/models/hf/transformers \
     TEMP_DIR=/tmp/judex \
-    TORCH_HOME=/models/torch
+    TORCH_HOME=/models/torch \
+    PORT=8080
 
 # Create directories
 RUN mkdir -p /models/hf /models/hf/transformers /models/torch /tmp/judex
@@ -39,12 +41,12 @@ COPY scripts/prefetch_models.py ./scripts/
 # Comment out for faster builds during development
 RUN python scripts/prefetch_models.py || echo "Model prefetch completed with warnings"
 
-# Expose model service port
-EXPOSE 8001
+# Expose port (Cloud Run uses PORT env var)
+EXPOSE 8080
 
 # Health check with longer timeout for GPU initialization
 HEALTHCHECK --interval=60s --timeout=30s --start-period=120s --retries=5 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=10)" || exit 1
+    CMD python -c "import os; import urllib.request; urllib.request.urlopen(f'http://localhost:{os.environ.get(\"PORT\", 8080)}/health', timeout=10)" || exit 1
 
-# Run model service
-CMD ["uvicorn", "model_service.main:app", "--host", "0.0.0.0", "--port", "8001"]
+# Run model service - use shell form to expand PORT env var
+CMD uvicorn model_service.main:app --host 0.0.0.0 --port ${PORT:-8080}
