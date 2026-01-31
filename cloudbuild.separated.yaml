@@ -1,0 +1,131 @@
+# Google Cloud Build - Separated Architecture
+# Deploys lightweight App service + GPU Model service independently
+#
+# Usage:
+#   gcloud builds submit --config=cloudbuild.separated.yaml
+#
+# Benefits:
+# - App container: ~200MB, 2s cold start, scales 0→100
+# - Model container: GPU-optimized, warm instances, independent scaling
+#
+# Prerequisites:
+# - Enable Cloud Run GPU (if using GPU)
+# - Create Artifact Registry repo: gcloud artifacts repositories create judex --repository-format=docker --location=europe-west1
+
+steps:
+  # ==========================================================================
+  # Build both images in parallel
+  # ==========================================================================
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-app'
+    args:
+      - 'build'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex-app:$COMMIT_SHA'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex-app:latest'
+      - '-f'
+      - 'docker/Dockerfile.app'
+      - '.'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-models'
+    args:
+      - 'build'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex-models:$COMMIT_SHA'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex-models:latest'
+      - '-f'
+      - 'docker/Dockerfile.models'
+      - '.'
+
+  # ==========================================================================
+  # Push images
+  # ==========================================================================
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'push-app'
+    args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex-app:$COMMIT_SHA']
+    waitFor: ['build-app']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'push-models'
+    args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex-models:$COMMIT_SHA']
+    waitFor: ['build-models']
+
+  # ==========================================================================
+  # Deploy Model Service first (app depends on it)
+  # ==========================================================================
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'deploy-models'
+    entrypoint: 'gcloud'
+    args:
+      - 'run'
+      - 'deploy'
+      - 'judex-models'
+      - '--image=${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex-models:$COMMIT_SHA'
+      - '--region=$_REGION'
+      - '--platform=managed'
+      - '--memory=8Gi'
+      - '--cpu=4'
+      - '--timeout=300'
+      - '--concurrency=10'
+      - '--min-instances=1'
+      - '--max-instances=5'
+      - '--allow-unauthenticated'
+      - '--cpu-boost'
+      # For GPU support (when available in your region):
+      # - '--gpu=1'
+      # - '--gpu-type=nvidia-l4'
+    waitFor: ['push-models']
+
+  # ==========================================================================
+  # Get Model Service URL
+  # ==========================================================================
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'get-models-url'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        MODEL_URL=$(gcloud run services describe judex-models --region=$_REGION --format='value(status.url)')
+        echo "MODEL_SERVICE_URL=$MODEL_URL" > /workspace/model_url.env
+        echo "Model service URL: $MODEL_URL"
+    waitFor: ['deploy-models']
+
+  # ==========================================================================
+  # Deploy App Service with Model URL
+  # ==========================================================================
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'deploy-app'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        source /workspace/model_url.env
+        gcloud run deploy judex-app \
+          --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex-app:$COMMIT_SHA \
+          --region=$_REGION \
+          --platform=managed \
+          --memory=2Gi \
+          --cpu=2 \
+          --timeout=300 \
+          --concurrency=80 \
+          --min-instances=0 \
+          --max-instances=100 \
+          --allow-unauthenticated \
+          --set-env-vars="USE_MODEL_SERVICE=true,MODEL_SERVICE_URL=$MODEL_SERVICE_URL"
+    waitFor: ['push-app', 'get-models-url']
+
+substitutions:
+  _REGION: europe-west1
+
+images:
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex-app:$COMMIT_SHA'
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex-app:latest'
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex-models:$COMMIT_SHA'
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex-models:latest'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: 'E2_HIGHCPU_8'

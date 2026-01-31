@@ -1,118 +1,70 @@
 # Google Cloud Build configuration for Judex
-# Builds and deploys both App and Model services
+# Monolith deployment - all-in-one container with ML models
+#
+# Usage:
+#   gcloud builds submit --config=cloudbuild.yaml
+#
+# For separated architecture (app + model service), see cloudbuild.separated.yaml
 
 steps:
   # ==========================================================================
-  # Build App Service (lightweight, CPU)
+  # Build Judex (monolith with all ML models)
   # ==========================================================================
   - name: 'gcr.io/cloud-builders/docker'
-    id: 'build-app'
+    id: 'build'
     args:
       - 'build'
       - '-t'
-      - 'gcr.io/$PROJECT_ID/judex-app:$COMMIT_SHA'
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex:$COMMIT_SHA'
       - '-t'
-      - 'gcr.io/$PROJECT_ID/judex-app:latest'
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex:latest'
       - '-f'
-      - 'docker/Dockerfile.app'
+      - 'Dockerfile'
       - '.'
 
   # ==========================================================================
-  # Build Model Service (GPU, heavy)
+  # Push to Artifact Registry
   # ==========================================================================
   - name: 'gcr.io/cloud-builders/docker'
-    id: 'build-models'
-    args:
-      - 'build'
-      - '-t'
-      - 'gcr.io/$PROJECT_ID/judex-models:$COMMIT_SHA'
-      - '-t'
-      - 'gcr.io/$PROJECT_ID/judex-models:latest'
-      - '-f'
-      - 'docker/Dockerfile.models'
-      - '.'
+    id: 'push'
+    args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex:$COMMIT_SHA']
+    waitFor: ['build']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'push-latest'
+    args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex:latest']
+    waitFor: ['build']
 
   # ==========================================================================
-  # Push images to Container Registry
-  # ==========================================================================
-  - name: 'gcr.io/cloud-builders/docker'
-    id: 'push-app'
-    args: ['push', 'gcr.io/$PROJECT_ID/judex-app:$COMMIT_SHA']
-    waitFor: ['build-app']
-
-  - name: 'gcr.io/cloud-builders/docker'
-    id: 'push-app-latest'
-    args: ['push', 'gcr.io/$PROJECT_ID/judex-app:latest']
-    waitFor: ['build-app']
-
-  - name: 'gcr.io/cloud-builders/docker'
-    id: 'push-models'
-    args: ['push', 'gcr.io/$PROJECT_ID/judex-models:$COMMIT_SHA']
-    waitFor: ['build-models']
-
-  - name: 'gcr.io/cloud-builders/docker'
-    id: 'push-models-latest'
-    args: ['push', 'gcr.io/$PROJECT_ID/judex-models:latest']
-    waitFor: ['build-models']
-
-  # ==========================================================================
-  # Deploy Model Service to Cloud Run (GPU) - Deploy first, app depends on it
+  # Deploy to Cloud Run
   # ==========================================================================
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'deploy-models'
+    id: 'deploy'
     entrypoint: 'gcloud'
     args:
       - 'run'
       - 'deploy'
-      - 'judex-models'
-      - '--image=gcr.io/$PROJECT_ID/judex-models:$COMMIT_SHA'
+      - 'judex'
+      - '--image=${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex:$COMMIT_SHA'
       - '--region=$_REGION'
       - '--platform=managed'
       - '--memory=8Gi'
       - '--cpu=4'
       - '--timeout=300'
       - '--concurrency=10'
-      - '--min-instances=1'  # Keep warm for fast inference
-      - '--max-instances=5'
-      - '--no-allow-unauthenticated'  # Internal service only
-      # Uncomment for GPU support when available:
-      # - '--gpu=1'
-      # - '--gpu-type=nvidia-l4'
-    waitFor: ['push-models']
-
-  # ==========================================================================
-  # Deploy App Service to Cloud Run (CPU)
-  # ==========================================================================
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'deploy-app'
-    entrypoint: 'gcloud'
-    args:
-      - 'run'
-      - 'deploy'
-      - 'judex-app'
-      - '--image=gcr.io/$PROJECT_ID/judex-app:$COMMIT_SHA'
-      - '--region=$_REGION'
-      - '--platform=managed'
-      - '--memory=2Gi'
-      - '--cpu=2'
-      - '--timeout=300'
-      - '--concurrency=80'
-      - '--min-instances=0'  # Scale to zero when idle
-      - '--max-instances=100'
+      - '--min-instances=0'
+      - '--max-instances=10'
       - '--allow-unauthenticated'
-      - '--set-env-vars=USE_MODEL_SERVICE=true'
-      - '--set-env-vars=MODEL_SERVICE_URL=https://judex-models-$_REGION.run.app'
-    waitFor: ['push-app', 'deploy-models']
+      - '--cpu-boost'
+    waitFor: ['push']
 
 substitutions:
-  _REGION: us-central1
+  _REGION: europe-west1
 
 images:
-  - 'gcr.io/$PROJECT_ID/judex-app:$COMMIT_SHA'
-  - 'gcr.io/$PROJECT_ID/judex-app:latest'
-  - 'gcr.io/$PROJECT_ID/judex-models:$COMMIT_SHA'
-  - 'gcr.io/$PROJECT_ID/judex-models:latest'
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex:$COMMIT_SHA'
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/judex/judex:latest'
 
 options:
   logging: CLOUD_LOGGING_ONLY
-  machineType: 'E2_HIGHCPU_8'  # Faster builds
+  machineType: 'E2_HIGHCPU_8'
